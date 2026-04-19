@@ -1,0 +1,318 @@
+"""FastMCP server exposing QVDs as SQL-queryable views.
+
+Tools are plain Python functions. They read/write module-level
+``_ctx`` (a small struct holding the DuckDB connection and state).
+Registering with FastMCP is done at module bottom via ``app.tool(fn)``
+rather than the ``@app.tool`` decorator, which keeps the plain function
+callable for unit tests.
+
+Safety model (Phase 1):
+
+1. DuckDB is in-memory, views lazily scan parquets on disk.
+2. The ``query`` tool applies a conservative regex blocklist that rejects
+   ``read_parquet``, ``read_csv``, ``read_json``, ``copy``, ``attach``,
+   and ``glob`` calls. This prevents an LLM-driven path-traversal via
+   user-supplied SQL.
+3. ``describe_qvd``/``sample_qvd`` take a ``view_name`` that must match
+   an entry in state; raw filesystem paths never cross the tool boundary.
+4. ``query`` results are capped at ``max_query_rows`` (default 1000,
+   ceiling 10000) and a per-query timeout.
+
+The threat model is "curious LLM, not malicious adversary." A determined
+attacker with shell access to the same machine already has everything the
+tool could leak; we just want to avoid accidental foot-guns.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+import duckdb
+from fastmcp import FastMCP
+
+from qvd_mcp import state as state_module
+from qvd_mcp.config import MAX_QUERY_ROW_CEILING, Config
+from qvd_mcp.convert import run_once
+
+log = logging.getLogger(__name__)
+
+app: FastMCP = FastMCP("qvd-mcp")
+
+# Any user-supplied SQL containing these tokens gets rejected. Bypasses exist
+# (quoting tricks, macros) but the goal is "stop LLM foot-guns," not
+# cryptographic isolation.
+_FORBIDDEN = re.compile(
+    r"\b(read_parquet|read_csv|read_json|parquet_scan|csv_scan|"
+    r"copy|attach|detach|load|install|pragma|glob)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class ServerContext:
+    config: Config
+    conn: duckdb.DuckDBPyConnection
+    state: state_module.State
+    _counts: dict[str, tuple[float, int]] = field(default_factory=dict)
+
+
+_ctx: ServerContext | None = None
+
+
+def _get_ctx() -> ServerContext:
+    if _ctx is None:
+        raise RuntimeError("server context not initialized; call serve() first")
+    return _ctx
+
+
+def set_context(ctx: ServerContext | None) -> None:
+    """Install (or clear) the module-level context. Tests use this directly."""
+    global _ctx
+    _ctx = ctx
+
+
+def _count(ctx: ServerContext, view_name: str) -> int:
+    now = time.monotonic()
+    cached = ctx._counts.get(view_name)
+    if cached is not None and now - cached[0] < 30:
+        return cached[1]
+    row = ctx.conn.execute(f'SELECT COUNT(*) FROM "{_q(view_name)}"').fetchone()
+    count = int(row[0]) if row else 0
+    ctx._counts[view_name] = (now, count)
+    return count
+
+
+def _q(ident: str) -> str:
+    """Quote-escape a SQL identifier (wrap in double quotes at call site)."""
+    return ident.replace('"', '""')
+
+
+def _qstr(text: str) -> str:
+    """Escape a single-quoted SQL string literal."""
+    return text.replace("'", "''")
+
+
+def _entry_by_view(ctx: ServerContext, view_name: str) -> tuple[str, state_module.StateEntry] | None:
+    for src, entry in ctx.state.entries.items():
+        if entry.view_name == view_name:
+            return src, entry
+    return None
+
+
+def _build_connection(config: Config, state: state_module.State) -> duckdb.DuckDBPyConnection:
+    conn = duckdb.connect(":memory:")
+    for entry in state.entries.values():
+        parquet = config.cache_dir / entry.parquet_path
+        if not parquet.is_file():
+            log.warning("parquet missing for view %s: %s", entry.view_name, parquet)
+            continue
+        sql = (
+            f'CREATE OR REPLACE VIEW "{_q(entry.view_name)}" AS '
+            f"SELECT * FROM read_parquet('{_qstr(str(parquet))}')"
+        )
+        conn.execute(sql)
+    return conn
+
+
+def _rebuild_views(ctx: ServerContext) -> None:
+    # Drop existing views, then recreate from current state.
+    existing = ctx.conn.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_type='VIEW'"
+    ).fetchall()
+    for (name,) in existing:
+        ctx.conn.execute(f'DROP VIEW IF EXISTS "{_q(name)}"')
+    for entry in ctx.state.entries.values():
+        parquet = ctx.config.cache_dir / entry.parquet_path
+        if not parquet.is_file():
+            continue
+        ctx.conn.execute(
+            f'CREATE OR REPLACE VIEW "{_q(entry.view_name)}" AS '
+            f"SELECT * FROM read_parquet('{_qstr(str(parquet))}')"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tool implementations (plain functions; registered at module bottom)
+# ---------------------------------------------------------------------------
+
+
+def list_qvds() -> list[dict[str, Any]]:
+    """List all QVDs currently loaded.
+
+    Returns one entry per view with its name, source path, row/column counts,
+    and last-converted timestamp.
+    """
+    ctx = _get_ctx()
+    out: list[dict[str, Any]] = []
+    for src, entry in sorted(ctx.state.entries.items(), key=lambda kv: kv[1].view_name):
+        out.append(
+            {
+                "view_name": entry.view_name,
+                "source_path": src,
+                "rows": _count(ctx, entry.view_name),
+                "columns": entry.columns,
+                "converted_at": entry.converted_at,
+            }
+        )
+    return out
+
+
+def describe_qvd(view_name: str) -> dict[str, Any]:
+    """Return the full schema for a QVD view: column names, DuckDB types,
+    nullability. ``view_name`` must match one from :func:`list_qvds`.
+    """
+    ctx = _get_ctx()
+    found = _entry_by_view(ctx, view_name)
+    if found is None:
+        return {
+            "error": {
+                "type": "UnknownView",
+                "message": f"no view named {view_name!r}. Call list_qvds to see available views.",
+            }
+        }
+    src, entry = found
+    described = ctx.conn.execute(f'DESCRIBE "{_q(view_name)}"').fetchall()
+    columns = [
+        {"name": row[0], "type": str(row[1]), "nullable": row[2] == "YES"}
+        for row in described
+    ]
+    return {
+        "view_name": view_name,
+        "source_path": src,
+        "rows": _count(ctx, view_name),
+        "columns": columns,
+        "converted_at": entry.converted_at,
+    }
+
+
+def sample_qvd(view_name: str, n: int = 10) -> dict[str, Any]:
+    """Return the first ``n`` rows of a view (capped at 1000).
+
+    Everyone's first question is "show me some rows," so we give the LLM a
+    cheap shortcut instead of making it guess ``SELECT * ... LIMIT n``.
+    """
+    ctx = _get_ctx()
+    if _entry_by_view(ctx, view_name) is None:
+        return {
+            "error": {
+                "type": "UnknownView",
+                "message": f"no view named {view_name!r}",
+            }
+        }
+    n = max(1, min(int(n), 1000))
+    rel = ctx.conn.execute(f'SELECT * FROM "{_q(view_name)}" LIMIT {n}')
+    cols = [d[0] for d in rel.description]
+    rows = rel.fetchall()
+    return {
+        "view_name": view_name,
+        "columns": cols,
+        "rows": [dict(zip(cols, row, strict=False)) for row in rows],
+        "row_count": len(rows),
+    }
+
+
+def query(sql: str, max_rows: int = 1000) -> dict[str, Any]:
+    """Execute read-only SQL against the loaded views.
+
+    ``max_rows`` defaults to 1000, hard-capped at 10000. Results beyond the
+    cap are truncated and ``truncated=True`` is set. Queries touching
+    filesystem-reading functions are rejected.
+    """
+    ctx = _get_ctx()
+    if _FORBIDDEN.search(sql):
+        return {
+            "error": {
+                "type": "Rejected",
+                "message": (
+                    "query uses a restricted function (read_parquet, copy, "
+                    "attach, pragma, etc.). Stick to SELECT over the "
+                    "registered views."
+                ),
+            }
+        }
+    limit = max(1, min(int(max_rows), MAX_QUERY_ROW_CEILING))
+    try:
+        rel = ctx.conn.execute(sql)
+    except duckdb.Error as exc:
+        return {"error": {"type": exc.__class__.__name__, "message": str(exc)}}
+    cols = [d[0] for d in rel.description]
+    rows = rel.fetchmany(limit)
+    truncated = len(rows) == limit and rel.fetchone() is not None
+    return {
+        "columns": cols,
+        "rows": [dict(zip(cols, r, strict=False)) for r in rows],
+        "row_count": len(rows),
+        "truncated": truncated,
+        "sql": sql,
+    }
+
+
+def search_columns(term: str, case_sensitive: bool = False) -> list[dict[str, str]]:
+    """Fuzzy-substring match column names across all views.
+
+    Useful when the schema is sprawling and the LLM doesn't know which view
+    has the column it needs.
+    """
+    ctx = _get_ctx()
+    needle = term if case_sensitive else term.lower()
+    hits: list[dict[str, str]] = []
+    for entry in ctx.state.entries.values():
+        schema = ctx.conn.execute(f'DESCRIBE "{_q(entry.view_name)}"').fetchall()
+        for row in schema:
+            col_name = str(row[0])
+            col_type = str(row[1])
+            haystack = col_name if case_sensitive else col_name.lower()
+            if needle in haystack:
+                hits.append(
+                    {
+                        "view_name": entry.view_name,
+                        "column_name": col_name,
+                        "type": col_type,
+                    }
+                )
+    return hits
+
+
+def refresh() -> dict[str, Any]:
+    """Run one conversion pass and re-register views.
+
+    Use this after updating a source QVD and wanting to query the new data
+    without restarting the server.
+    """
+    ctx = _get_ctx()
+    report = run_once(ctx.config)
+    ctx.state = state_module.load(ctx.config.cache_dir)
+    _rebuild_views(ctx)
+    ctx._counts.clear()
+    return {
+        "converted": len(report.converted),
+        "skipped": len(report.skipped),
+        "failed": len(report.failed),
+        "pruned": len(report.pruned),
+        "summary": report.summary(),
+    }
+
+
+# Register everything with FastMCP. Registering via direct call (not @decorator)
+# leaves the function names bound to the originals so tests can invoke them.
+for _fn in (list_qvds, describe_qvd, sample_qvd, query, search_columns, refresh):
+    app.tool(_fn)
+
+
+def serve(config: Config) -> None:
+    """Start the MCP server over stdio. Blocks until the client disconnects."""
+    current_state = state_module.load(config.cache_dir)
+    conn = _build_connection(config, current_state)
+    set_context(ServerContext(config=config, conn=conn, state=current_state))
+    log.info(
+        "qvd-mcp serving %d views from %s (source: %s)",
+        len(current_state.entries),
+        config.cache_dir,
+        config.source_dir,
+    )
+    # show_banner=False silences FastMCP's ASCII banner. The env-var
+    # equivalent only applies to FastMCP's own CLI entry point, not app.run().
+    app.run(transport="stdio", show_banner=False)

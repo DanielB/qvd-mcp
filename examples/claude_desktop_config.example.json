@@ -1,0 +1,22 @@
+{
+  "_comment": "Example Claude Desktop config. Merge the 'mcpServers.qvd' block into your own config at the platform-appropriate path (e.g. ~/Library/Application Support/Claude/claude_desktop_config.json on macOS). Choose ONE of the command blocks below.",
+
+  "mcpServers": {
+    "qvd": {
+      "command": "uvx",
+      "args": ["qvd-mcp", "serve"]
+    }
+  },
+
+  "_alternative_local_dev": {
+    "mcpServers": {
+      "qvd": {
+        "command": "uv",
+        "args": [
+          "--directory", "/absolute/path/to/qvd-mcp",
+          "run", "qvd-mcp", "serve"
+        ]
+      }
+    }
+  }
+}
