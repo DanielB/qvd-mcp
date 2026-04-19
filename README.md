@@ -7,13 +7,6 @@ Qlik QVD files as SQL-queryable views. It converts QVDs to Parquet on a
 skip-if-unchanged basis, then answers questions from any MCP-compatible
 client — Claude Desktop, Claude Code, Cursor, and friends — via DuckDB.
 
-> **A note on Qlik licences.** The QVD format is Qlik's, not publicly
-> documented; this project leans on community-maintained parsers that
-> figured things out the hard way. Whether you're allowed to read *your*
-> QVDs with a non-Qlik tool depends on whatever you signed with Qlik —
-> check yours before use, because we haven't. qvd-mcp is not affiliated
-> with or endorsed by Qlik, in either direction.
->
 > **A note on access control.** QVD files on disk have forgotten whatever
 > section-access rules the Qlik app that produced them may have enforced,
 > and qvd-mcp doesn't know any better — it hands whole rows to whoever's
