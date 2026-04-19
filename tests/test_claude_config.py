@@ -28,22 +28,86 @@ def test_default_config_path_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not str(path).startswith("~")  # ~ expanded
 
 
-def test_default_config_path_win32(
+def test_default_config_path_win32_unpackaged(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    # Point LOCALAPPDATA at a clean dir with no Packages/Claude_* — so the
+    # MSIX probe misses and we fall through to %APPDATA%\Claude.
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
     path = default_config_path()
     assert path.parts[-2:] == ("Claude", "claude_desktop_config.json")
-    # APPDATA is respected.
-    assert str(tmp_path) in str(path)
+    assert "Roaming" in str(path)
+    assert "Packages" not in str(path)
+
+
+def test_default_config_path_win32_packaged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # MSIX / Microsoft Store builds virtualise AppData into a per-package
+    # LocalCache; the app never looks at plain %APPDATA%\Claude.
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    local = tmp_path / "Local"
+    packaged = local / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache"
+    packaged.mkdir(parents=True)
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+
+    path = default_config_path()
+
+    assert "Packages" in path.parts
+    assert "Claude_pzs8sxrjxfjjc" in path.parts
+    assert path.parts[-4:] == (
+        "LocalCache",
+        "Roaming",
+        "Claude",
+        "claude_desktop_config.json",
+    )
+
+
+def test_default_config_path_win32_packaged_matches_any_claude_suffix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The MSIX family-name suffix is cert-derived and could change across
+    # rebuilds. Glob on ``Claude_*`` so we don't pin to a single suffix.
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    local = tmp_path / "Local"
+    packaged = local / "Packages" / "Claude_8xfutureproof" / "LocalCache"
+    packaged.mkdir(parents=True)
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+
+    path = default_config_path()
+
+    assert "Claude_8xfutureproof" in path.parts
+
+
+def test_default_config_path_win32_ignores_package_without_localcache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A ``Claude_*`` directory with no LocalCache inside is an uninstalled
+    # leftover. Treat it as absent and fall through to %APPDATA%\Claude.
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    local = tmp_path / "Local"
+    (local / "Packages" / "Claude_stale").mkdir(parents=True)
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+
+    path = default_config_path()
+
+    assert "Packages" not in path.parts
+    assert path.parts[-2:] == ("Claude", "claude_desktop_config.json")
 
 
 def test_default_config_path_win32_without_appdata(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.delenv("APPDATA", raising=False)
+    # Also point LOCALAPPDATA at a clean dir so the packaged probe doesn't
+    # accidentally win on a dev machine that actually has Claude installed.
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
     path = default_config_path()
     # Falls back to ~/AppData/Roaming/Claude/...
     assert path.parts[-4:] == (

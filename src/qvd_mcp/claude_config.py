@@ -53,26 +53,56 @@ class ClaudeConfigError(Exception):
     """
 
 
-def default_config_path() -> Path:
-    """Return the platform-appropriate Claude Desktop config path.
+def candidate_config_paths() -> list[Path]:
+    """Every plausible Claude Desktop config location on this system,
+    highest-priority first.
+
+    On macOS and Linux there's a single canonical path, so the list has one
+    entry. On Windows it can have up to two: the MSIX-packaged path (if a
+    ``Claude_*`` package is installed) and the unpackaged ``%APPDATA%\\Claude``
+    path. Co-writing to both is harmless — whichever install is live reads
+    its own, and the other file just sits unread.
 
     ``sys.platform`` is read at call time so tests can monkeypatch it.
     """
     if sys.platform == "darwin":
-        return (
-            Path("~/Library/Application Support/Claude").expanduser()
-            / CONFIG_FILENAME
-        )
+        return [
+            Path("~/Library/Application Support/Claude").expanduser() / CONFIG_FILENAME
+        ]
     if sys.platform in ("win32", "cygwin"):
+        paths: list[Path] = []
+        # Packaged (MSIX / Microsoft Store) — Claude Desktop's Store build
+        # virtualises ``%APPDATA%`` into its own per-package LocalCache, so
+        # plain ``%APPDATA%\Claude\claude_desktop_config.json`` is invisible
+        # to it. A ``Claude_*`` folder under ``%LOCALAPPDATA%\Packages`` with
+        # a ``LocalCache`` subdirectory is the "install is live" tell.
+        localappdata = os.environ.get("LOCALAPPDATA") or str(
+            Path("~/AppData/Local").expanduser()
+        )
+        packages = Path(localappdata) / "Packages"
+        if packages.is_dir():
+            for pkg in sorted(packages.glob("Claude_*")):
+                cache = pkg / "LocalCache"
+                if cache.is_dir():
+                    paths.append(cache / "Roaming" / "Claude" / CONFIG_FILENAME)
+        # Unpackaged — always include as a co-write target. Covers the
+        # traditional installer case; if Claude Desktop isn't installed in
+        # that flavour, the file is inert.
         appdata = os.environ.get("APPDATA")
         base = (
             Path(appdata)
             if appdata
             else Path("~/AppData/Roaming").expanduser()
         )
-        return base / "Claude" / CONFIG_FILENAME
+        paths.append(base / "Claude" / CONFIG_FILENAME)
+        return paths
     # Linux, BSD, everything else.
-    return Path("~/.config/Claude").expanduser() / CONFIG_FILENAME
+    return [Path("~/.config/Claude").expanduser() / CONFIG_FILENAME]
+
+
+def default_config_path() -> Path:
+    """Primary Claude Desktop config path (first of :func:`candidate_config_paths`)."""
+    return candidate_config_paths()[0]
 
 
 def _load_existing(config_path: Path) -> dict[str, Any]:
@@ -123,13 +153,28 @@ def merge(
 ) -> None:
     """Merge one entry into ``mcpServers`` in the Claude Desktop config.
 
+    When ``config_path`` is given, only that file is touched. Otherwise
+    every path returned by :func:`candidate_config_paths` is updated — on
+    Windows that can mean both the MSIX-packaged and the unpackaged
+    locations, which is how we cover either install variant transparently.
+
     Idempotent — running twice updates the entry rather than duplicating.
     Preserves every other top-level key and every other ``mcpServers``
     entry. Writes a one-deep ``.bak`` of the pre-merge contents (bytes
     verbatim) when an existing file is present, then atomically replaces
     the target with the new JSON.
     """
-    path = config_path if config_path is not None else default_config_path()
+    paths = [config_path] if config_path is not None else candidate_config_paths()
+    for path in paths:
+        _merge_into(path, server_name, command, args)
+
+
+def _merge_into(
+    path: Path,
+    server_name: str,
+    command: str,
+    args: list[str],
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     data = _load_existing(path)
@@ -161,12 +206,25 @@ def unmerge(
 ) -> bool:
     """Remove ``server_name`` from ``mcpServers``. Returns whether anything changed.
 
-    Missing file or malformed JSON → ``False`` (no-op, no exception). If
-    ``mcpServers`` becomes empty after the removal, the whole key is
-    dropped so the file doesn't accumulate empty containers. The ``.bak``
-    file from a prior ``merge`` is deliberately left untouched.
+    When ``config_path`` is given, only that file is touched. Otherwise
+    every path from :func:`candidate_config_paths` is checked; any that
+    had the entry gets it removed, and we return ``True`` if any change
+    happened in any location.
+
+    Missing file or malformed JSON at a given path → that path is skipped
+    silently. If ``mcpServers`` becomes empty after the removal, the
+    whole key is dropped so the file doesn't accumulate empty containers.
+    The ``.bak`` file from a prior ``merge`` is deliberately left untouched.
     """
-    path = config_path if config_path is not None else default_config_path()
+    paths = [config_path] if config_path is not None else candidate_config_paths()
+    changed = False
+    for path in paths:
+        if _unmerge_from(path, server_name):
+            changed = True
+    return changed
+
+
+def _unmerge_from(path: Path, server_name: str) -> bool:
     if not path.is_file():
         return False
 

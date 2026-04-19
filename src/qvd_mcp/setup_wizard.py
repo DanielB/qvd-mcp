@@ -258,10 +258,11 @@ def run_setup(
 
     if choices.patch_claude:
         claude_path = claude_config.default_config_path()
-        # Clean up any legacy entry from before the canonical rename. No-op
-        # on fresh installs.
-        claude_config.unmerge(claude_config.LEGACY_SERVER_NAME)
         command, args = _claude_desktop_command()
+        # ``merge`` writes to every candidate path (on Windows that may be
+        # both the packaged-MSIX and unpackaged locations); setup never
+        # removes entries the user put there themselves, including any
+        # legacy ``qvd`` key from an older release.
         claude_config.merge(claude_config.QVD_SERVER_NAME, command, args)
         log.info(
             "merged %s entry into %s (command=%s)",

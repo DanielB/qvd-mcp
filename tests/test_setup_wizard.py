@@ -35,6 +35,11 @@ def _patch_defaults(
     monkeypatch.setattr(
         claude_config, "default_config_path", lambda: claude_path
     )
+    # Also pin the list-form so merge/unmerge co-write logic targets the
+    # tmp path instead of the real system's Claude Desktop config.
+    monkeypatch.setattr(
+        claude_config, "candidate_config_paths", lambda: [claude_path]
+    )
     monkeypatch.setattr(
         qmcp_config, "default_config_path", lambda: config_path
     )
@@ -171,12 +176,12 @@ def test_setup_uses_local_command_when_checkout_detected(
     ]
 
 
-def test_setup_migrates_legacy_qvd_key(
+def test_setup_preserves_unrelated_entries_and_legacy_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Seed the Claude Desktop config with a legacy "qvd" entry (the name used
-    # before the canonical rename). Setup should remove it and insert the new
-    # "qvd-mcp" entry instead.
+    # Seed the Claude Desktop config with both a user's own unrelated entry
+    # and a legacy "qvd" entry from an older qvd-mcp release. Setup must
+    # only touch the canonical "qvd-mcp" key — nothing else gets removed.
     source = tmp_path / "src"
     cache = tmp_path / "cache"
     generate_all(source)
@@ -184,9 +189,11 @@ def test_setup_migrates_legacy_qvd_key(
     claude_path.write_text(
         json.dumps(
             {
+                "preferences": {"theme": "dark"},
                 "mcpServers": {
-                    "qvd": {"command": "uvx", "args": ["qvd-mcp", "serve"]}
-                }
+                    "qvd": {"command": "uvx", "args": ["qvd-mcp", "serve"]},
+                    "other-tool": {"command": "node", "args": ["server.js"]},
+                },
             }
         ),
         encoding="utf-8",
@@ -195,8 +202,13 @@ def test_setup_migrates_legacy_qvd_key(
     run_setup(yes=True, source=source, cache=cache)
 
     data: Any = json.loads(claude_path.read_text(encoding="utf-8"))
-    assert "qvd" not in data["mcpServers"]
+    # Canonical entry added.
     assert "qvd-mcp" in data["mcpServers"]
+    # Legacy and unrelated entries left alone.
+    assert "qvd" in data["mcpServers"]
+    assert "other-tool" in data["mcpServers"]
+    # Other top-level keys preserved.
+    assert data["preferences"] == {"theme": "dark"}
 
 
 def test_setup_yes_is_idempotent(
