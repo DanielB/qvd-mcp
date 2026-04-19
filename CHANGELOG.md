@@ -94,6 +94,15 @@ command.
   `run_sql` follows the verb-phrase pattern of the other tools.
 - **Canonical Claude Desktop server key is `qvd-mcp`** (matches the
   package name), not `qvd`. Legacy entries are left alone on upgrade.
+- **Token-efficient MCP response shapes.** `sample_qvd` and `run_sql`
+  now return `rows` as positional arrays aligned with `columns`
+  (``[[1, "a"], [2, "b"]]``) instead of repeating column-name keys
+  per row — roughly 50–60% smaller payload on wide results. `run_sql`
+  no longer echoes the submitted `sql` back in its response; the
+  caller already has it. `describe_qvd` drops the `nullable` field
+  (DuckDB reports ``YES`` for every column in a ``read_parquet``
+  view, so the bit is noise). `list_qvds` drops `converted_at` from
+  its always-visible inventory; ask `describe_qvd` when you need it.
 
 ### Known limitations
 

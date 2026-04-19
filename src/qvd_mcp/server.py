@@ -240,13 +240,15 @@ def list_qvds() -> list[dict[str, Any]]:
     ctx = _get_ctx()
     out: list[dict[str, Any]] = []
     for src, entry in sorted(ctx.state.entries.items(), key=lambda kv: kv[1].view_name):
+        # ``converted_at`` is deliberately omitted here — lazy auto-refresh
+        # makes freshness a non-question, and skipping it shrinks the
+        # always-visible inventory. Fetch from ``describe_qvd`` when needed.
         out.append(
             {
                 "view_name": entry.view_name,
                 "source_path": src,
                 "rows": _count(ctx, entry.view_name),
                 "columns": entry.columns,
-                "converted_at": entry.converted_at,
             }
         )
     return out
@@ -270,10 +272,10 @@ def describe_qvd(view_name: str) -> dict[str, Any]:
         }
     src, entry = found
     described = ctx.conn.execute(f'DESCRIBE "{_q(view_name)}"').fetchall()
-    columns = [
-        {"name": row[0], "type": str(row[1]), "nullable": row[2] == "YES"}
-        for row in described
-    ]
+    # ``nullable`` is dropped deliberately: DuckDB reports ``"YES"`` for every
+    # column in a ``read_parquet``-backed view because the scanner doesn't
+    # enforce NOT NULL, so the field is effectively noise in our output.
+    columns = [{"name": row[0], "type": str(row[1])} for row in described]
     return {
         "view_name": view_name,
         "source_path": src,
@@ -304,10 +306,13 @@ def sample_qvd(view_name: str, n: int = 10) -> dict[str, Any]:
     rel = ctx.conn.execute(f'SELECT * FROM "{_q(view_name)}" LIMIT {n}')
     cols = [d[0] for d in rel.description]
     rows = rel.fetchall()
+    # Columnar shape: ``rows`` is a list of positional arrays aligned with
+    # ``columns``. Saves the per-row repetition of column-name keys that a
+    # list-of-dicts shape carries, which adds up fast for wide tables.
     return {
         "view_name": view_name,
         "columns": cols,
-        "rows": [dict(zip(cols, row, strict=False)) for row in rows],
+        "rows": [list(row) for row in rows],
         "row_count": len(rows),
     }
 
@@ -354,12 +359,13 @@ def run_sql(sql: str, max_rows: int = 1000) -> dict[str, Any]:
         return {"error": {"type": exc.__class__.__name__, "message": str(exc)}}
     finally:
         timer.cancel()
+    # Columnar rows (see ``sample_qvd``); ``sql`` is not echoed back since
+    # the caller already has it in the turn that sent this request.
     return {
         "columns": cols,
-        "rows": [dict(zip(cols, r, strict=False)) for r in rows],
+        "rows": [list(r) for r in rows],
         "row_count": len(rows),
         "truncated": truncated,
-        "sql": sql,
     }
 
 

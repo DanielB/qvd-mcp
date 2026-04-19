@@ -75,7 +75,9 @@ def test_sample_unknown_view(loaded_ctx: server_module.ServerContext) -> None:
 def test_query_basic(loaded_ctx: server_module.ServerContext) -> None:
     result = server_module.run_sql("SELECT COUNT(*) AS n FROM plain_numbers")
     assert "error" not in result
-    assert result["rows"][0]["n"] == 5
+    # Rows are positional arrays aligned with ``columns``.
+    assert result["columns"] == ["n"]
+    assert result["rows"][0][0] == 5
 
 
 def test_query_rejects_read_parquet(loaded_ctx: server_module.ServerContext) -> None:
@@ -112,7 +114,8 @@ def test_query_allows_reserved_words_as_identifiers(loaded_ctx: server_module.Se
     # function-call or statement-prefix position.
     result = server_module.run_sql("SELECT 1 AS load, 2 AS copy, 3 AS glob, 4 AS pragma")
     assert "error" not in result
-    assert result["rows"][0] == {"load": 1, "copy": 2, "glob": 3, "pragma": 4}
+    assert result["columns"] == ["load", "copy", "glob", "pragma"]
+    assert result["rows"][0] == [1, 2, 3, 4]
 
 
 def test_query_allows_semicolon_terminated_select(loaded_ctx: server_module.ServerContext) -> None:

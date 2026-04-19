@@ -208,11 +208,14 @@ Expected shape (one entry per view, sorted by view name):
     "view_name": "sales_2024",
     "source_path": "/Users/you/Documents/QVDs/Sales 2024.qvd",
     "rows": 184503,
-    "columns": 17,
-    "converted_at": "2026-04-18T14:07:12Z"
+    "columns": 17
   }
 ]
 ```
+
+Conversion timestamps are omitted on purpose — the server auto-refreshes
+on source changes, so freshness is rarely load-bearing. Call
+`describe_qvd` if you want the exact `converted_at`.
 
 ### `describe_qvd(view_name)`
 
@@ -220,10 +223,10 @@ Expected shape (one entry per view, sorted by view name):
 describe_qvd(view_name: str) -> dict
 ```
 
-Full schema for one view — column names, DuckDB types, nullability,
-plus the same metadata `list_qvds` returns. `view_name` must match an
-entry from `list_qvds`; an unknown name returns a structured
-`UnknownView` error.
+Full schema for one view — column names, DuckDB types, plus the same
+metadata `list_qvds` returns and the conversion timestamp. `view_name`
+must match an entry from `list_qvds`; an unknown name returns a
+structured `UnknownView` error.
 
 Example invocation:
 
@@ -239,8 +242,8 @@ Expected shape:
   "source_path": "/Users/you/Documents/QVDs/Sales 2024.qvd",
   "rows": 184503,
   "columns": [
-    {"name": "OrderId", "type": "BIGINT", "nullable": false},
-    {"name": "OrderDate", "type": "TIMESTAMP", "nullable": true}
+    {"name": "OrderId", "type": "BIGINT"},
+    {"name": "OrderDate", "type": "TIMESTAMP"}
   ],
   "converted_at": "2026-04-18T14:07:12Z"
 }
@@ -252,9 +255,9 @@ Expected shape:
 sample_qvd(view_name: str, n: int = 10) -> dict
 ```
 
-Return the first `n` rows of a view as dictionaries. `n` is clamped to
-`[1, 1000]`. Cheap shortcut for "show me some rows" without making the
-LLM construct a `SELECT * … LIMIT n`.
+Return the first `n` rows of a view. `n` is clamped to `[1, 1000]`.
+Cheap shortcut for "show me some rows" without making the LLM
+construct a `SELECT * … LIMIT n`.
 
 Example invocation:
 
@@ -262,14 +265,15 @@ Example invocation:
 sample_qvd(view_name="sales_2024", n=5)
 ```
 
-Expected shape:
+Expected shape — `rows` are positional arrays aligned with `columns`:
 
 ```json
 {
   "view_name": "sales_2024",
   "columns": ["OrderId", "OrderDate", "Amount"],
   "rows": [
-    {"OrderId": 1001, "OrderDate": "2024-01-03T00:00:00", "Amount": 148.50}
+    [1001, "2024-01-03T00:00:00", 148.50],
+    [1002, "2024-01-03T00:00:00", 99.00]
   ],
   "row_count": 5
 }
@@ -298,17 +302,17 @@ run_sql(
 )
 ```
 
-Expected shape:
+Expected shape — `rows` are positional arrays aligned with `columns`:
 
 ```json
 {
   "columns": ["OrderDate", "total"],
   "rows": [
-    {"OrderDate": "2024-01-03T00:00:00", "total": 148.50}
+    ["2024-01-03T00:00:00", 148.50],
+    ["2024-01-04T00:00:00", 2093.17]
   ],
   "row_count": 100,
-  "truncated": false,
-  "sql": "SELECT OrderDate, SUM(Amount) AS total FROM sales_2024 GROUP BY 1 ORDER BY 1"
+  "truncated": false
 }
 ```
 
