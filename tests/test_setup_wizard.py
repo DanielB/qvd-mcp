@@ -176,6 +176,37 @@ def test_setup_uses_local_command_when_checkout_detected(
     ]
 
 
+def test_setup_writes_include_exclude_to_config_and_config_roundtrips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "src"
+    cache = tmp_path / "cache"
+    generate_all(source)
+    _claude_path, config_path, _log = _patch_defaults(monkeypatch, tmp_path)
+
+    run_setup(
+        yes=True,
+        source=source,
+        cache=cache,
+        no_claude=True,
+        include=("plain_*.qvd", "duals.qvd"),
+        exclude=("archive/*",),
+    )
+
+    # Config file serialises both filters as TOML literal-string arrays.
+    parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    assert parsed["include"] == ["plain_*.qvd", "duals.qvd"]
+    assert parsed["exclude"] == ["archive/*"]
+
+    # Loading that config reconstitutes the filters as tuples and conversion
+    # only touches the matching fixtures.
+    cfg = qmcp_config.load(config_path=config_path)
+    assert cfg.include == ("plain_*.qvd", "duals.qvd")
+    assert cfg.exclude == ("archive/*",)
+    produced = sorted(p.name for p in cache.glob("*.parquet"))
+    assert produced == ["duals.parquet", "plain_numbers.parquet"]
+
+
 def test_setup_preserves_unrelated_entries_and_legacy_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

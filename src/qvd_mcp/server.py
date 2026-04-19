@@ -43,7 +43,7 @@ from mcp.server.fastmcp import FastMCP
 
 from qvd_mcp import state as state_module
 from qvd_mcp.config import MAX_QUERY_ROW_CEILING, Config
-from qvd_mcp.convert import run_once
+from qvd_mcp.convert import discover_qvds, run_once
 
 log = logging.getLogger(__name__)
 
@@ -180,13 +180,16 @@ def _any_source_changed(ctx: ServerContext) -> bool:
         if st.st_mtime_ns != entry.source_mtime_ns or st.st_size != entry.source_size:
             return True
 
-    # Path-key invariant: state keys and our rglob strings must match character
-    # for character. ``convert.run_once`` iterates the same rglob and stores
-    # ``str(qvd_path)`` without ``.resolve()``; keep both sides unresolved or
-    # every tool call will trigger a full refresh.
+    # Path-key invariant: state keys and our discovered paths must match
+    # character for character. ``convert.run_once`` iterates the same
+    # ``discover_qvds`` result and stores ``str(qvd_path)`` without
+    # ``.resolve()``; keep both sides unresolved or every tool call will
+    # trigger a full refresh. Using ``discover_qvds`` here also means the
+    # ``include`` / ``exclude`` filters are respected by lazy refresh —
+    # a new file under an excluded pattern doesn't retrigger conversion.
     known = set(ctx.state.entries)
     try:
-        for qvd in ctx.config.source_dir.rglob("*.qvd"):
+        for qvd in discover_qvds(ctx.config):
             if str(qvd) not in known:
                 return True
     except OSError:

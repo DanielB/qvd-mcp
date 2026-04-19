@@ -28,3 +28,13 @@ source_dir = "/Users/you/Documents/QVDs"
 
 # Optional. Debounce window (seconds) for lazy auto-refresh; 0 disables.
 # auto_refresh_debounce_s = 10
+
+# Optional. Glob pattern(s), relative to source_dir, that scope which QVDs
+# get converted. Defaults to all *.qvd files. Patterns are matched
+# recursively (rglob-style) — use subpath fragments for targeted includes.
+# include = ["sales/*.qvd", "customers*.qvd"]
+
+# Optional. Glob pattern(s) to exclude after ``include`` is applied.
+# Matched against both filename and path-relative-to-source_dir, so
+# ``archive/*`` and ``*.backup.qvd`` shapes both work.
+# exclude = ["archive/*", "*.backup.qvd"]

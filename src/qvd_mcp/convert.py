@@ -5,10 +5,12 @@ tool calls it. Failures are per-file: one bad QVD never aborts a pass.
 """
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -53,6 +55,41 @@ def _reader_version(name: str) -> str:
         return ""
 
 
+def discover_qvds(config: Config) -> list[Path]:
+    """Enumerate source QVDs under ``config.source_dir`` after applying
+    ``include`` and ``exclude`` glob filters.
+
+    ``include`` patterns (default ``["*.qvd"]``) are passed to ``rglob``,
+    so they match recursively and support subpath fragments like
+    ``sales/*.qvd``. ``exclude`` patterns are applied second and match
+    via :mod:`fnmatch` against both the filename and the path relative
+    to ``source_dir`` — ``archive/*`` and ``*.backup.qvd`` both work.
+
+    Returns a sorted list so name-allocation during conversion is stable.
+    """
+    source_dir = config.source_dir
+    matched: set[Path] = set()
+    for pattern in config.include:
+        for path in source_dir.rglob(pattern):
+            if path.is_file():
+                matched.add(path)
+
+    if config.exclude:
+        def _excluded(path: Path) -> bool:
+            try:
+                rel_str = str(path.relative_to(source_dir))
+            except ValueError:
+                rel_str = str(path)
+            for pat in config.exclude:
+                if fnmatch.fnmatch(rel_str, pat) or fnmatch.fnmatch(path.name, pat):
+                    return True
+            return False
+
+        matched = {p for p in matched if not _excluded(p)}
+
+    return sorted(matched)
+
+
 def run_once(config: Config) -> ConvertReport:
     """One full conversion pass over ``config.source_dir``.
 
@@ -63,7 +100,7 @@ def run_once(config: Config) -> ConvertReport:
     config.cache_dir.mkdir(parents=True, exist_ok=True)
 
     prior = state.load(config.cache_dir)
-    qvds = sorted(config.source_dir.rglob("*.qvd"))
+    qvds = discover_qvds(config)
     report = ConvertReport()
 
     # Seed taken names with the view names of files still present, so we

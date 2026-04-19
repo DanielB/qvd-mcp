@@ -102,6 +102,10 @@ MCP client (Claude Desktop, Cursor, …)
 **Discovery.** `qvd-mcp` recursively scans `source_dir` for `*.qvd` files
 on every conversion pass. Nothing about the layout matters — subdirectories
 are fine, filenames are the only identifier the rest of the pipeline sees.
+Scope it with optional `include` and `exclude` glob lists in the config
+file (or `--include` / `--exclude` on `qvd-mcp convert` and `qvd-mcp
+setup`, repeatable) when you want a subset — e.g. `include =
+["sales/*.qvd"]` plus `exclude = ["*.backup.qvd"]`.
 
 **Reading.** PyQvd parses each QVD and returns row-major Python values.
 Qlik's dual fields (number-plus-display-string pairs) are unwrapped to

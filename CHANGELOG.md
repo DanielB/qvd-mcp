@@ -94,6 +94,15 @@ command.
   `run_sql` follows the verb-phrase pattern of the other tools.
 - **Canonical Claude Desktop server key is `qvd-mcp`** (matches the
   package name), not `qvd`. Legacy entries are left alone on upgrade.
+- **Selective QVD conversion via `include` / `exclude` globs.** Two
+  optional config keys (and matching repeatable `--include` /
+  `--exclude` CLI flags on both `convert` and `setup`) scope which
+  files get converted. Defaults to all `*.qvd`, so existing setups
+  are unaffected. Patterns are recursive (rglob-style) for
+  `include`; `exclude` is applied second and matches both filename
+  and source-relative path — `archive/*` and `*.backup.qvd` both
+  work. Filters are honored by `run_once`, by lazy auto-refresh, and
+  written into `config.toml` when passed to `setup --yes`.
 - **Token-efficient MCP response shapes.** `sample_qvd` and `run_sql`
   now return `rows` as positional arrays aligned with `columns`
   (``[[1, "a"], [2, "b"]]``) instead of repeating column-name keys

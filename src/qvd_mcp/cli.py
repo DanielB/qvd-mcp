@@ -57,13 +57,19 @@ def main(
 
 
 def _load_or_exit(
-    source: Path | None, cache: Path | None, log_level: str | None
+    source: Path | None,
+    cache: Path | None,
+    log_level: str | None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 ) -> Config:
     try:
         return load_config(
             source_override=source,
             cache_override=cache,
             log_level_override=log_level,
+            include_override=tuple(include) if include else None,
+            exclude_override=tuple(exclude) if exclude else None,
         )
     except ConfigError as exc:
         _err.print(f"[bold red]config error:[/bold red] {exc}")
@@ -80,10 +86,24 @@ def convert(
         Path | None,
         typer.Option("--cache", help="Parquet cache directory. Overrides config.cache_dir."),
     ] = None,
+    include: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--include",
+            help="Glob pattern to include (repeatable). Defaults to *.qvd.",
+        ),
+    ] = None,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--exclude",
+            help="Glob pattern to exclude (repeatable). Applied after --include.",
+        ),
+    ] = None,
     log_level: Annotated[str, typer.Option("--log-level")] = "INFO",
 ) -> None:
     """Run one QVD → Parquet conversion pass, print a summary, exit."""
-    config = _load_or_exit(source, cache, log_level)
+    config = _load_or_exit(source, cache, log_level, include, exclude)
     configure_cli(config.log_level, config.log_dir)
     report = run_once(config)
 
@@ -130,6 +150,20 @@ def setup(
         Path | None,
         typer.Option("--cache", help="Parquet cache dir. Defaults to platformdirs."),
     ] = None,
+    include: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--include",
+            help="Glob pattern to include (repeatable). Written into config.toml.",
+        ),
+    ] = None,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--exclude",
+            help="Glob pattern to exclude (repeatable). Written into config.toml.",
+        ),
+    ] = None,
     no_claude: Annotated[
         bool,
         typer.Option("--no-claude", help="Skip patching the Claude Desktop config."),
@@ -141,7 +175,14 @@ def setup(
 ) -> None:
     """Interactive setup: write config.toml, patch Claude Desktop, run first conversion."""
     try:
-        run_setup(source=source, cache=cache, no_claude=no_claude, yes=yes)
+        run_setup(
+            source=source,
+            cache=cache,
+            no_claude=no_claude,
+            yes=yes,
+            include=tuple(include) if include else None,
+            exclude=tuple(exclude) if exclude else None,
+        )
     except SetupError as exc:
         _err.print(f"[bold red]setup failed:[/bold red] {exc}")
         raise typer.Exit(code=2) from exc

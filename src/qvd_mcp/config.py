@@ -16,6 +16,8 @@ DEFAULT_MAX_QUERY_ROWS = 1000
 MAX_QUERY_ROW_CEILING = 10_000
 DEFAULT_QUERY_TIMEOUT_S = 30
 DEFAULT_AUTO_REFRESH_DEBOUNCE_S = 10
+DEFAULT_INCLUDE: tuple[str, ...] = ("*.qvd",)
+DEFAULT_EXCLUDE: tuple[str, ...] = ()
 
 
 def default_cache_dir() -> Path:
@@ -44,6 +46,11 @@ class Config:
     log_level: str = "INFO"
     log_dir: Path = field(default_factory=default_log_dir)
     auto_refresh_debounce_s: int = DEFAULT_AUTO_REFRESH_DEBOUNCE_S
+    # Glob patterns (relative to ``source_dir``) that scope which QVDs
+    # are discovered. ``include`` defaults to all ``.qvd`` files; ``exclude``
+    # is additionally applied after ``include`` and wins on match.
+    include: tuple[str, ...] = DEFAULT_INCLUDE
+    exclude: tuple[str, ...] = DEFAULT_EXCLUDE
 
     def parquet_path_for(self, view_name: str) -> Path:
         return self.cache_dir / f"{view_name}.parquet"
@@ -65,12 +72,28 @@ def _coerce_int(raw: dict[str, object], key: str, fallback: int) -> int:
     return value
 
 
+def _coerce_str_list(
+    raw: dict[str, object], key: str, fallback: tuple[str, ...]
+) -> tuple[str, ...]:
+    value = raw.get(key)
+    if value is None:
+        return fallback
+    if not isinstance(value, list):
+        raise ConfigError(f"config key '{key}' must be a list of strings")
+    for item in value:
+        if not isinstance(item, str):
+            raise ConfigError(f"config key '{key}' must contain only strings")
+    return tuple(value)
+
+
 def load(
     config_path: Path | None = None,
     *,
     source_override: Path | None = None,
     cache_override: Path | None = None,
     log_level_override: str | None = None,
+    include_override: tuple[str, ...] | None = None,
+    exclude_override: tuple[str, ...] | None = None,
 ) -> Config:
     """Load config, applying CLI overrides on top of file values and defaults.
 
@@ -118,6 +141,17 @@ def load(
 
     log_level = (log_level_override or _coerce_str(raw, "log_level") or "INFO").upper()
 
+    include = (
+        include_override
+        if include_override is not None
+        else _coerce_str_list(raw, "include", DEFAULT_INCLUDE)
+    )
+    exclude = (
+        exclude_override
+        if exclude_override is not None
+        else _coerce_str_list(raw, "exclude", DEFAULT_EXCLUDE)
+    )
+
     return Config(
         source_dir=source_dir,
         cache_dir=cache_dir,
@@ -126,4 +160,6 @@ def load(
         query_timeout_s=timeout,
         log_level=log_level,
         auto_refresh_debounce_s=debounce,
+        include=include,
+        exclude=exclude,
     )

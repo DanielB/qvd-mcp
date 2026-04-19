@@ -51,6 +51,8 @@ class SetupChoices:
     source_dir: Path
     cache_dir: Path
     patch_claude: bool
+    include: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
 
 
 def gather_interactive() -> SetupChoices:
@@ -113,6 +115,11 @@ def _toml_literal_string(value: str) -> str:
     return f"'{value}'"
 
 
+def _toml_literal_list(values: tuple[str, ...]) -> str:
+    """Serialize ``values`` as a TOML inline array of literal strings."""
+    return "[" + ", ".join(_toml_literal_string(v) for v in values) + "]"
+
+
 def write_config_toml(choices: SetupChoices, *, path: Path | None = None) -> Path:
     """Write a minimal ``config.toml`` reflecting ``choices``.
 
@@ -131,6 +138,10 @@ def write_config_toml(choices: SetupChoices, *, path: Path | None = None) -> Pat
         f"source_dir = {_toml_literal_string(source_str)}\n"
         f"cache_dir = {_toml_literal_string(cache_str)}\n"
     )
+    if choices.include:
+        payload += f"include = {_toml_literal_list(choices.include)}\n"
+    if choices.exclude:
+        payload += f"exclude = {_toml_literal_list(choices.exclude)}\n"
 
     tmp = target.with_suffix(target.suffix + ".tmp")
     try:
@@ -214,6 +225,8 @@ def run_setup(
     cache: Path | None = None,
     no_claude: bool = False,
     yes: bool = False,
+    include: tuple[str, ...] | None = None,
+    exclude: tuple[str, ...] | None = None,
 ) -> None:
     """Drive the whole setup flow.
 
@@ -247,11 +260,17 @@ def run_setup(
             source_dir=source_resolved,
             cache_dir=cache_resolved,
             patch_claude=not no_claude,
+            include=include or (),
+            exclude=exclude or (),
         )
     else:
         choices = gather_interactive()
         if no_claude:
             choices = dataclasses.replace(choices, patch_claude=False)
+        if include:
+            choices = dataclasses.replace(choices, include=include)
+        if exclude:
+            choices = dataclasses.replace(choices, exclude=exclude)
 
     config_path = write_config_toml(choices)
     console.print(f"Wrote config to [bold]{config_path}[/bold]")
