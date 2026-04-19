@@ -34,3 +34,8 @@ Thumbs.db
 .qvd-mcp-state.json
 *.parquet
 *.parquet.tmp
+
+# AI-tooling convention notes — kept local, not tracked.
+CLAUDE.md
+AGENTS.md
+.aider*
