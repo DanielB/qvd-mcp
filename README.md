@@ -41,7 +41,9 @@ uvx qvd-mcp setup
 uvx qvd-mcp setup --yes --source ~/Documents/QVDs
 ```
 
-Restart Claude Desktop and ask *"list the QVDs you can see"* to confirm.
+Restart Claude Desktop and ask *"list the QVDs you can see"* to confirm the
+wiring. Claude Desktop caches the MCP tool list at connect time, so a fresh
+launch after `setup` is what makes the server visible.
 
 Prefer to wire things by hand? `qvd-mcp convert --source ...` runs a single
 conversion pass and `qvd-mcp serve` boots the stdio server — then add this
@@ -60,38 +62,7 @@ to your `claude_desktop_config.json`:
 
 Run `qvd-mcp doctor` any time to see what's wired up and what isn't.
 
-## What the MCP server exposes
-
-| Tool | What it does |
-| --- | --- |
-| `list_qvds()` | List every loaded QVD with row/column counts and paths. |
-| `describe_qvd(view_name)` | Full schema for one view — column names and DuckDB types. |
-| `sample_qvd(view_name, n=10)` | First `n` rows of a view. Capped at 1000. |
-| `run_sql(sql, max_rows=1000)` | Arbitrary read-only SQL across the views. Hard-capped at 10 000 rows. |
-| `search_columns(term)` | Substring match over column names across all views. |
-| `refresh()` | Run a conversion pass and re-register views. Useful after editing source QVDs. |
-
-View names come from filename stems, lowercased and normalized for SQL
-(e.g. `Sales 2024.qvd` becomes the view `sales_2024`), so you can type
-`SELECT * FROM sales_2024` without quoting.
-
-**Auto-refresh.** Before answering any tool call, the server checks source
-mtimes (debounced, default 10 s). If anything changed, it re-runs conversion
-and re-registers views, then answers. Set `auto_refresh_debounce_s = 0` in
-your config to disable and use the explicit `refresh()` tool instead.
-
-## Commands
-
-| Command | What it does |
-| --- | --- |
-| `qvd-mcp setup` | Interactive wizard: config + Claude Desktop merge + first conversion. Add `--yes --source <path>` to script it. |
-| `qvd-mcp convert` | Run one QVD → Parquet conversion pass. |
-| `qvd-mcp serve` | Run the MCP server over stdio. This is what Claude Desktop invokes. |
-| `qvd-mcp doctor` | Nine diagnostic checks. Exit 0 all-pass, 1 any-fail, 2 config-broken. |
-| `qvd-mcp uninstall` | Remove the Claude Desktop entry. `--delete-cache` also drops the Parquet cache. Source QVDs are never touched. |
-| `qvd-mcp --version` | Print version and exit. |
-
-## Architecture
+## How it works
 
 ```
 QVD files (source directory on disk)
@@ -109,15 +80,310 @@ FastMCP server (stdio transport)
 MCP client (Claude Desktop, Cursor, …)
 ```
 
-Nothing exotic. Every hop is a boring, well-tested library doing the thing
-it's best at.
+**Discovery.** `qvd-mcp` recursively scans `source_dir` for `*.qvd` files
+on every conversion pass. Nothing about the layout matters — subdirectories
+are fine, filenames are the only identifier the rest of the pipeline sees.
+
+**Reading.** PyQvd parses each QVD and returns row-major Python values.
+Qlik's dual fields (number-plus-display-string pairs) are unwrapped to
+the numeric side, because that is almost always what SQL wants.
+Timestamps and dates arrive as `datetime` and `date`, money fields come
+back as `Decimal` and get cast to `float64`, and empty cells become
+Python `None`. Empty QVDs emit a typed-but-empty string-column schema
+rather than failing to materialise.
+
+**Arrow conversion.** Values land in a `pyarrow.Table`. If a column
+turns out to hold mixed or unsupported types, the reader falls back to
+a string representation so the whole file still makes it to Parquet
+rather than failing the pass.
+
+**Parquet write.** The table is written as `<view>.parquet.tmp` with
+zstd compression, then promoted to `<view>.parquet` via `os.replace`.
+A crashed conversion can never leave a torn file.
+
+**State sidecar.** A `.qvd-mcp-state.json` file in the cache directory
+records one entry per QVD: view name, Parquet filename, source
+`mtime_ns` and `size`, conversion timestamp, and row/column counts.
+It is the single source of truth for skip-if-unchanged and for view
+registration on server startup.
+
+**View registration.** Each Parquet file becomes one DuckDB view. The
+view name comes from the filename stem, lowercased, with any run of
+non-alphanumeric characters collapsed to a single underscore — so
+`Sales 2024.qvd` becomes the view `sales_2024`, and you can type
+`SELECT * FROM sales_2024` without quoting. Collisions get a numeric
+suffix; leading digits, SQL reserved words, and Unicode are all
+normalised.
+
+### What data is queried
+
+DuckDB reads the **Parquet cache**, not the QVDs, during a query.
+Views are defined as `SELECT * FROM read_parquet(...)` and the
+original QVDs are only touched during the conversion pass. That means
+each query only loads the columns it actually references, not the
+whole row — one of the reasons a Parquet-backed cache is worth the
+extra copy on disk.
+
+### When conversion runs
+
+Four triggers re-run conversion, each with a specific purpose:
+
+1. **Lazy auto-refresh.** Before every tool call (except `refresh`
+   itself), the server probes source `(mtime_ns, size)` against the
+   state sidecar and the `source_dir` for new files. If anything
+   drifted, it runs a conversion pass and re-registers views before
+   answering. Debounced at 10 seconds by default; set
+   `auto_refresh_debounce_s = 0` in config to disable and use `refresh`
+   explicitly.
+2. **The `refresh()` MCP tool.** Runs one conversion pass and rebuilds
+   views. Useful when the debounce window is still open but you want
+   fresh data right now.
+3. **`qvd-mcp convert`** on the CLI. One-shot conversion pass, prints
+   a summary, exits. Handy in CI or a cron job.
+4. **`qvd-mcp setup`**. The wizard runs one conversion pass after
+   writing the config, so the cache is warm before you start the
+   server.
+
+Every pass applies the same **skip-if-unchanged** rule: if the recorded
+`(mtime_ns, size)` still matches the file on disk and the Parquet is
+present, the QVD is not re-read. One bad file never aborts a pass —
+failures are per-file and reported in the summary.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `qvd-mcp setup` | Interactive wizard: config + Claude Desktop merge + first conversion. Add `--yes --source <path>` to script it. |
+| `qvd-mcp convert` | Run one QVD → Parquet conversion pass. |
+| `qvd-mcp serve` | Run the MCP server over stdio. This is what Claude Desktop invokes. |
+| `qvd-mcp doctor` | Nine diagnostic checks. Exit 0 all-pass, 1 any-fail, 2 config-broken. |
+| `qvd-mcp uninstall` | Remove the Claude Desktop entry. `--delete-cache` also drops the Parquet cache. Source QVDs are never touched. |
+| `qvd-mcp --version` | Print version and exit. |
+
+## MCP tools reference
+
+The server registers six tools on a FastMCP stdio transport. All tool
+calls except `refresh()` are wrapped in the auto-refresh probe described
+above.
+
+### `list_qvds()`
+
+```
+list_qvds() -> list[dict]
+```
+
+List every loaded QVD with row and column counts, source path, and the
+timestamp of its last conversion. Takes no arguments.
+
+Example invocation:
+
+```
+list_qvds()
+```
+
+Expected shape (one entry per view, sorted by view name):
+
+```json
+[
+  {
+    "view_name": "sales_2024",
+    "source_path": "/Users/you/Documents/QVDs/Sales 2024.qvd",
+    "rows": 184503,
+    "columns": 17,
+    "converted_at": "2026-04-18T14:07:12Z"
+  }
+]
+```
+
+### `describe_qvd(view_name)`
+
+```
+describe_qvd(view_name: str) -> dict
+```
+
+Full schema for one view — column names, DuckDB types, nullability,
+plus the same metadata `list_qvds` returns. `view_name` must match an
+entry from `list_qvds`; an unknown name returns a structured
+`UnknownView` error.
+
+Example invocation:
+
+```
+describe_qvd(view_name="sales_2024")
+```
+
+Expected shape:
+
+```json
+{
+  "view_name": "sales_2024",
+  "source_path": "/Users/you/Documents/QVDs/Sales 2024.qvd",
+  "rows": 184503,
+  "columns": [
+    {"name": "OrderId", "type": "BIGINT", "nullable": false},
+    {"name": "OrderDate", "type": "TIMESTAMP", "nullable": true}
+  ],
+  "converted_at": "2026-04-18T14:07:12Z"
+}
+```
+
+### `sample_qvd(view_name, n=10)`
+
+```
+sample_qvd(view_name: str, n: int = 10) -> dict
+```
+
+Return the first `n` rows of a view as dictionaries. `n` is clamped to
+`[1, 1000]`. Cheap shortcut for "show me some rows" without making the
+LLM construct a `SELECT * … LIMIT n`.
+
+Example invocation:
+
+```
+sample_qvd(view_name="sales_2024", n=5)
+```
+
+Expected shape:
+
+```json
+{
+  "view_name": "sales_2024",
+  "columns": ["OrderId", "OrderDate", "Amount"],
+  "rows": [
+    {"OrderId": 1001, "OrderDate": "2024-01-03T00:00:00", "Amount": 148.50}
+  ],
+  "row_count": 5
+}
+```
+
+### `run_sql(sql, max_rows=1000)`
+
+```
+run_sql(sql: str, max_rows: int = 1000) -> dict
+```
+
+Execute arbitrary read-only SQL across the registered views. `max_rows`
+defaults to 1000 and is hard-capped at 10 000; anything beyond the cap
+is truncated and `truncated: true` is returned. SQL that touches
+filesystem-reading functions or DDL statements is rejected with a
+`Rejected` error — see [SECURITY.md](SECURITY.md) for the list.
+Per-query timeout defaults to 30 seconds and cancels the query via
+`conn.interrupt()`.
+
+Example invocation:
+
+```
+run_sql(
+  sql="SELECT OrderDate, SUM(Amount) AS total FROM sales_2024 GROUP BY 1 ORDER BY 1",
+  max_rows=100,
+)
+```
+
+Expected shape:
+
+```json
+{
+  "columns": ["OrderDate", "total"],
+  "rows": [
+    {"OrderDate": "2024-01-03T00:00:00", "total": 148.50}
+  ],
+  "row_count": 100,
+  "truncated": false,
+  "sql": "SELECT OrderDate, SUM(Amount) AS total FROM sales_2024 GROUP BY 1 ORDER BY 1"
+}
+```
+
+On rejection or engine error the tool returns an `error` object instead:
+
+```json
+{"error": {"type": "Rejected", "message": "SQL uses a restricted function or statement …"}}
+```
+
+### `search_columns(term, case_sensitive=False)`
+
+```
+search_columns(term: str, case_sensitive: bool = False) -> list[dict]
+```
+
+Substring match over column names across every registered view. Useful
+when the schema is sprawling and the LLM doesn't know which view holds
+the column it needs.
+
+Example invocation:
+
+```
+search_columns(term="amount")
+```
+
+Expected shape (one entry per matching column):
+
+```json
+[
+  {"view_name": "sales_2024", "column_name": "Amount", "type": "DOUBLE"},
+  {"view_name": "returns_2024", "column_name": "RefundAmount", "type": "DOUBLE"}
+]
+```
+
+### `refresh()`
+
+```
+refresh() -> dict
+```
+
+Force a conversion pass, rebuild views, clear row-count caches. Use
+after editing a source QVD when you don't want to wait for the
+auto-refresh debounce window to re-open.
+
+Example invocation:
+
+```
+refresh()
+```
+
+Expected shape:
+
+```json
+{
+  "converted": 2,
+  "skipped": 18,
+  "failed": 0,
+  "pruned": 1,
+  "summary": "converted=2 skipped=18 failed=0 pruned=1"
+}
+```
 
 ## Configuration
 
-See [`examples/config.example.toml`](examples/config.example.toml). The only
-required field is `source_dir`; everything else has a sensible default.
-Config lives at `~/.config/qvd-mcp/config.toml` on macOS/Linux and
-`%APPDATA%\qvd-mcp\config.toml` on Windows.
+Configuration lives at `~/.config/qvd-mcp/config.toml` on macOS and
+Linux and `%APPDATA%\qvd-mcp\config.toml` on Windows. The only required
+field is `source_dir`; everything else has a sensible default. See
+[`examples/config.example.toml`](examples/config.example.toml) for a
+commented skeleton.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `source_dir` | *(required)* | Directory of QVDs to scan recursively. |
+| `cache_dir` | platformdirs user cache | Where the Parquet cache and state sidecar live. |
+| `reader` | `"pyqvd"` | QVD parser backend. Only `pyqvd` ships in this release. |
+| `max_query_rows` | `1000` | Default `run_sql` row cap. Hard ceiling is 10 000. |
+| `query_timeout_s` | `30` | Per-query timeout; `conn.interrupt()` fires when it expires. |
+| `log_level` | `"INFO"` | `DEBUG` / `INFO` / `WARNING` / `ERROR`. |
+| `auto_refresh_debounce_s` | `10` | Seconds between lazy-refresh probes. `0` disables the probe. |
+
+## Dependencies
+
+Runtime dependencies only. Dev and test extras are pulled in by
+`uv sync --all-extras --dev`.
+
+| Package | Role | License |
+| --- | --- | --- |
+| [PyQvd](https://github.com/MuellerConstantin/PyQvd) | QVD file parsing | MIT |
+| [PyArrow](https://arrow.apache.org/docs/python/) | Columnar memory and Parquet I/O | Apache 2.0 |
+| [DuckDB](https://duckdb.org/) | In-process SQL engine | MIT |
+| [FastMCP](https://github.com/jlowin/fastmcp) | MCP server implementation | MIT |
+| [platformdirs](https://github.com/platformdirs/platformdirs) | Cross-platform user directories | MIT |
+| [Typer](https://typer.tiangolo.com/) | CLI argument parsing | MIT |
+| [Rich](https://github.com/Textualize/rich) | CLI output formatting | MIT |
 
 ## Privacy & telemetry
 
@@ -125,6 +391,39 @@ Config lives at `~/.config/qvd-mcp/config.toml` on macOS/Linux and
 no telemetry, no analytics, and no phone-home. The server reads your
 local QVDs, writes a local Parquet cache, and speaks to one local MCP
 client over stdio. That's it.
+
+## Troubleshooting / FAQ
+
+**Claude Desktop shows the tool list but won't call one of the
+`qvd-mcp` tools.** The MCP tool list is cached at connect time. Quit
+Claude Desktop fully (not just close the window) and reopen it — the
+new tool list is picked up on the next connect.
+
+**I updated a QVD and Claude still sees the old data.** Auto-refresh
+is debounced; the default window is 10 seconds. Either wait 10 seconds
+and ask again, call the `refresh()` MCP tool to force a pass, or set
+`auto_refresh_debounce_s = 0` in config to disable the probe and rely
+on `refresh()` only.
+
+**Why a Parquet cache — why not read QVDs directly on each query?**
+Parquet is columnar, type-rich, and compressed; DuckDB's query engine
+is heavily optimised for it. A query that touches three columns only
+loads those three columns, not the whole row. Round-tripping through
+Parquet once at conversion time is cheaper than re-parsing a QVD on
+every query, especially for repeated aggregations over the same file.
+
+**Can `run_sql` write or attach files?** No. The tool rejects the
+file-reading DuckDB functions (`read_parquet`, `read_csv`,
+`read_json`, `read_text`, `glob`, and variants) and the DDL statements
+(`ATTACH`, `DETACH`, `COPY`, `INSTALL`, `LOAD`, `PRAGMA`, `EXPORT`,
+`IMPORT`). SQL that tries to use them comes back with a `Rejected`
+error rather than executing. See [SECURITY.md](SECURITY.md) for the
+threat model.
+
+**Where's the log file?** Under the platform user log directory for
+`qvd-mcp` — `~/Library/Logs/qvd-mcp/` on macOS,
+`~/.local/state/qvd-mcp/log/` on Linux, `%LOCALAPPDATA%\qvd-mcp\Logs\`
+on Windows. `qvd-mcp doctor` prints the resolved path in its report.
 
 ## Attribution
 

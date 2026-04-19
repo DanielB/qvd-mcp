@@ -41,6 +41,8 @@ qvd-mcp = "qvd_mcp.cli:app"
 Homepage = "https://github.com/DanielB/qvd-mcp"
 Source = "https://github.com/DanielB/qvd-mcp"
 Issues = "https://github.com/DanielB/qvd-mcp/issues"
+Changelog = "https://github.com/DanielB/qvd-mcp/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/DanielB/qvd-mcp#readme"
 
 [dependency-groups]
 dev = [

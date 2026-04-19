@@ -1,0 +1,16 @@
+name: lint
+
+on: [push, pull_request]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras --dev
+      - run: uv run ruff check .
+      - run: uv run mypy src/qvd_mcp
