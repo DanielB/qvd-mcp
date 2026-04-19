@@ -380,7 +380,7 @@ Runtime dependencies only. Dev and test extras are pulled in by
 | [PyQvd](https://github.com/MuellerConstantin/PyQvd) | QVD file parsing | MIT |
 | [PyArrow](https://arrow.apache.org/docs/python/) | Columnar memory and Parquet I/O | Apache 2.0 |
 | [DuckDB](https://duckdb.org/) | In-process SQL engine | MIT |
-| [FastMCP](https://github.com/jlowin/fastmcp) | MCP server implementation | MIT |
+| [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) | MCP protocol + `FastMCP` 1.0 decorator API (`mcp.server.fastmcp`) | MIT |
 | [platformdirs](https://github.com/platformdirs/platformdirs) | Cross-platform user directories | MIT |
 | [Typer](https://typer.tiangolo.com/) | CLI argument parsing | MIT |
 | [Rich](https://github.com/Textualize/rich) | CLI output formatting | MIT |

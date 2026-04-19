@@ -1,10 +1,14 @@
-"""FastMCP server exposing QVDs as SQL-queryable views.
+"""MCP server exposing QVDs as SQL-queryable views.
 
 Tools are plain Python functions. They read/write module-level
 ``_ctx`` (a small struct holding the DuckDB connection and state).
-Registering with FastMCP is done at module bottom via ``app.tool(fn)``
-rather than the ``@app.tool`` decorator, which keeps the plain function
+Registration happens at module bottom via ``app.add_tool(fn)`` rather
+than the ``@app.tool()`` decorator, which keeps the plain function
 callable for unit tests.
+
+We depend on the official ``mcp`` SDK directly (``mcp.server.fastmcp``)
+rather than the standalone ``fastmcp`` 2.x package — same decorator-based
+API, dramatically smaller transitive dependency tree.
 
 Safety model (Phase 1):
 
@@ -35,7 +39,7 @@ from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
 
 import duckdb
-from fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP
 
 from qvd_mcp import state as state_module
 from qvd_mcp.config import MAX_QUERY_ROW_CEILING, Config
@@ -411,10 +415,11 @@ def refresh() -> dict[str, Any]:
     }
 
 
-# Register everything with FastMCP. Registering via direct call (not @decorator)
-# leaves the function names bound to the originals so tests can invoke them.
+# Register everything with the MCP SDK's FastMCP. Using ``add_tool`` (direct
+# call) rather than the ``@tool()`` decorator leaves the function names bound
+# to the originals so unit tests can invoke them as plain Python callables.
 for _fn in (list_qvds, describe_qvd, sample_qvd, run_sql, search_columns, refresh):
-    app.tool(_fn)
+    app.add_tool(_fn)
 
 
 def serve(config: Config) -> None:
@@ -428,6 +433,6 @@ def serve(config: Config) -> None:
         config.cache_dir,
         config.source_dir,
     )
-    # show_banner=False silences FastMCP's ASCII banner. The env-var
-    # equivalent only applies to FastMCP's own CLI entry point, not app.run().
-    app.run(transport="stdio", show_banner=False)
+    # ``mcp.server.fastmcp`` doesn't print a banner and doesn't phone home,
+    # so there's nothing to silence here.
+    app.run(transport="stdio")

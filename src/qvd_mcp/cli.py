@@ -112,15 +112,7 @@ def serve(
     """Run the MCP server over stdio until the client disconnects.
 
     Stdout is reserved for the JSON-RPC stream; human output goes to stderr.
-    We also opt out of FastMCP's banner and PyPI update check so startup
-    stays quiet and offline — the tool should behave the same with or
-    without a network connection.
     """
-    import os
-
-    os.environ.setdefault("FASTMCP_SHOW_CLI_BANNER", "false")
-    os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
-
     config = _load_or_exit(source, cache, log_level)
     configure_server(config.log_level, config.log_dir)
     from qvd_mcp.server import serve as _serve

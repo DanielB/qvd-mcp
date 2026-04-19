@@ -28,8 +28,8 @@ Public pitch: "Query QVD files directly from disk with SQL and AI."
 
 - `from __future__ import annotations` at the top of every module.
 - Fully type-annotated. `mypy --strict` must pass on `src/qvd_mcp`.
-  Missing-stubs overrides for `pyqvd`, `pyarrow`, `fastmcp`, `duckdb`
-  live in `pyproject.toml` — don't add more unless a new dep lacks stubs.
+  Missing-stubs overrides for `pyqvd`, `pyarrow`, `mcp`, `duckdb` live
+  in `pyproject.toml` — don't add more unless a new dep lacks stubs.
 - `ruff check .` clean. 100-char lines. Rules: `E, F, I, UP, B, SIM, N`.
 - Frozen dataclasses for config; use `dataclasses.replace` when tests
   need to vary a field.
