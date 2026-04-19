@@ -25,6 +25,7 @@ import contextlib
 import dataclasses
 import logging
 import os
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,7 +38,6 @@ from qvd_mcp import config as qmcp_config
 
 log = logging.getLogger(__name__)
 
-_QVD_SERVER_NAME = "qvd"
 _QVD_SERVER_COMMAND = "uvx"
 _QVD_SERVER_ARGS: list[str] = ["qvd-mcp", "serve"]
 
@@ -145,6 +145,55 @@ def write_config_toml(choices: SetupChoices, *, path: Path | None = None) -> Pat
     return target
 
 
+def detect_local_checkout(start: Path | None = None) -> Path | None:
+    """Return the qvd-mcp source-repo root if we're running from one.
+
+    Walks up from ``start`` (default: the current working directory) looking
+    for a ``pyproject.toml`` whose ``[project].name`` is ``qvd-mcp``. Returns
+    ``None`` if no such ancestor exists.
+
+    Used by :func:`run_setup` to wire Claude Desktop at the user's local
+    ``uv --directory ... run qvd-mcp serve`` command instead of the
+    PyPI-flavoured ``uvx qvd-mcp serve`` while the package is still
+    pre-release. Once qvd-mcp ships on PyPI this function keeps working —
+    end users just won't be inside a checkout, so it returns ``None`` and
+    setup picks the production form.
+    """
+    base = (start if start is not None else Path.cwd()).resolve()
+    for candidate in [base, *base.parents]:
+        pyproject = candidate / "pyproject.toml"
+        if not pyproject.is_file():
+            continue
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return None
+        name = data.get("project", {}).get("name")
+        if name == "qvd-mcp":
+            return candidate
+        # Different project's pyproject — stop walking up. Nesting qvd-mcp
+        # inside another Python project is unusual enough that guessing
+        # would be more surprising than falling back to the PyPI form.
+        return None
+    return None
+
+
+def _claude_desktop_command() -> tuple[str, list[str]]:
+    """Pick the command to wire into Claude Desktop for this environment.
+
+    Prefers a detected local checkout (so unreleased versions work
+    end-to-end); falls back to the production ``uvx qvd-mcp serve`` form.
+    """
+    checkout = detect_local_checkout()
+    if checkout is not None:
+        log.info(
+            "local-dev checkout detected at %s; using `uv --directory` form",
+            checkout,
+        )
+        return "uv", ["--directory", str(checkout), "run", "qvd-mcp", "serve"]
+    return _QVD_SERVER_COMMAND, list(_QVD_SERVER_ARGS)
+
+
 def _print_report_table(
     report: convert.ConvertReport, console: Console
 ) -> None:
@@ -209,11 +258,21 @@ def run_setup(
 
     if choices.patch_claude:
         claude_path = claude_config.default_config_path()
-        claude_config.merge(
-            _QVD_SERVER_NAME, _QVD_SERVER_COMMAND, list(_QVD_SERVER_ARGS)
+        # Clean up any legacy entry from before the canonical rename. No-op
+        # on fresh installs.
+        claude_config.unmerge(claude_config.LEGACY_SERVER_NAME)
+        command, args = _claude_desktop_command()
+        claude_config.merge(claude_config.QVD_SERVER_NAME, command, args)
+        log.info(
+            "merged %s entry into %s (command=%s)",
+            claude_config.QVD_SERVER_NAME,
+            claude_path,
+            command,
         )
-        log.info("merged qvd entry into %s", claude_path)
-        console.print(f"Merged Claude Desktop entry into [bold]{claude_path}[/bold]")
+        console.print(
+            f"Merged Claude Desktop entry into [bold]{claude_path}[/bold] "
+            f"(command: [cyan]{command} {' '.join(args)}[/cyan])"
+        )
 
     try:
         cfg = qmcp_config.load(

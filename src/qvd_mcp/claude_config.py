@@ -36,6 +36,14 @@ log = logging.getLogger(__name__)
 
 CONFIG_FILENAME = "claude_desktop_config.json"
 
+# The key under which our entry lives inside ``mcpServers``. Kept here as a
+# single source of truth so every caller (setup, doctor, uninstall) agrees.
+QVD_SERVER_NAME = "qvd-mcp"
+
+# A previous iteration used ``"qvd"`` as the key. Setup and uninstall remove
+# it defensively so the upgrade is transparent.
+LEGACY_SERVER_NAME = "qvd"
+
 
 class ClaudeConfigError(Exception):
     """Raised for genuinely unrecoverable errors (e.g. filesystem write failure).

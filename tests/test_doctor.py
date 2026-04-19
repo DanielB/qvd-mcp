@@ -325,7 +325,7 @@ def test_claude_config_missing_qvd_entry_warns(
     _patch_claude_path(monkeypatch, target)
     result = doctor.check_claude_desktop_config()
     assert result.status == "warn"
-    assert "qvd" in result.message
+    assert "qvd-mcp" in result.message
 
 
 def test_claude_config_pass(
@@ -336,7 +336,7 @@ def test_claude_config_pass(
         json.dumps(
             {
                 "mcpServers": {
-                    "qvd": {"command": "uvx", "args": ["qvd-mcp", "serve"]},
+                    "qvd-mcp": {"command": "uvx", "args": ["qvd-mcp", "serve"]},
                 }
             }
         ),

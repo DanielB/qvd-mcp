@@ -306,13 +306,14 @@ def check_claude_desktop_config() -> CheckResult:
             f"top-level JSON value in {path} is not an object",
         )
     servers = data.get("mcpServers")
-    if not isinstance(servers, dict) or "qvd" not in servers:
+    expected = claude_config.QVD_SERVER_NAME
+    if not isinstance(servers, dict) or expected not in servers:
         return CheckResult(
             CLAUDE_CHECK_NAME,
             "warn",
-            "qvd entry not found; run `qvd-mcp setup`",
+            f"{expected} entry not found; run `qvd-mcp setup`",
         )
-    return CheckResult(CLAUDE_CHECK_NAME, "pass", f"qvd entry present in {path}")
+    return CheckResult(CLAUDE_CHECK_NAME, "pass", f"{expected} entry present in {path}")
 
 
 def check_recent_logs(config: Config | None) -> CheckResult:

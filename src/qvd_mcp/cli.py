@@ -201,9 +201,11 @@ def uninstall(
         pass
 
     claude_path = claude_config.default_config_path()
+    server_name = claude_config.QVD_SERVER_NAME
     _out.print("This will:")
     _out.print(
-        f"  • Remove qvd-mcp from Claude Desktop config at [bold]{claude_path}[/bold]"
+        f"  • Remove the '{server_name}' entry from Claude Desktop config at "
+        f"[bold]{claude_path}[/bold]"
     )
     if delete_cache:
         _out.print(f"  • Delete the Parquet cache at [bold]{cache_dir}[/bold]")
@@ -221,12 +223,20 @@ def uninstall(
         _out.print("Aborted.")
         raise typer.Exit(code=0)
 
-    removed = claude_config.unmerge("qvd")
-    if removed:
-        _out.print(f"[green]Removed qvd entry from {claude_path}[/green]")
+    # Remove both the canonical key and the legacy "qvd" key so uninstalls
+    # from pre-rename installs clean up fully.
+    legacy_removed = claude_config.unmerge(claude_config.LEGACY_SERVER_NAME)
+    removed = claude_config.unmerge(server_name)
+    if removed or legacy_removed:
+        parts: list[str] = []
+        if removed:
+            parts.append(f"'{server_name}'")
+        if legacy_removed:
+            parts.append("legacy 'qvd'")
+        _out.print(f"[green]Removed {' and '.join(parts)} from {claude_path}[/green]")
     else:
         _out.print(
-            f"[yellow]No qvd entry found in {claude_path} (nothing to do)[/yellow]"
+            f"[yellow]No qvd-mcp entry found in {claude_path} (nothing to do)[/yellow]"
         )
 
     if delete_cache and cache_dir.is_dir():

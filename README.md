@@ -50,7 +50,7 @@ to your `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "qvd": {
+    "qvd-mcp": {
       "command": "uvx",
       "args": ["qvd-mcp", "serve"]
     }
