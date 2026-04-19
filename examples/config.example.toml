@@ -17,7 +17,7 @@ source_dir = "/Users/you/Documents/QVDs"
 # Optional. The QVD reader library. Only "pyqvd" is supported in this release.
 # reader = "pyqvd"
 
-# Optional. Hard ceiling on rows returned by the `query` MCP tool (max 10000).
+# Optional. Hard ceiling on rows returned by the `run_sql` MCP tool (max 10000).
 # max_query_rows = 1000
 
 # Optional. Per-query timeout in seconds.

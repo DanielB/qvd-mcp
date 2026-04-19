@@ -38,7 +38,7 @@ Public pitch: "Query QVD files directly from disk with SQL and AI."
 
 ## Safety invariants (do not remove without replacement)
 
-- The `query` MCP tool applies a two-regex blocklist in `server.py`:
+- The `run_sql` MCP tool applies a two-regex blocklist in `server.py`:
   `_FORBIDDEN_FUNCTIONS` (function-call form, e.g. `read_parquet(`) and
   `_FORBIDDEN_STATEMENTS` (statement-start form, e.g. `^|;` + `ATTACH`).
   Adding a new file-reading DuckDB function? Add it to

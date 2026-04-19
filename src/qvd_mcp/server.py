@@ -9,13 +9,13 @@ callable for unit tests.
 Safety model (Phase 1):
 
 1. DuckDB is in-memory, views lazily scan parquets on disk.
-2. The ``query`` tool applies a conservative regex blocklist that rejects
+2. The ``run_sql`` tool applies a conservative regex blocklist that rejects
    ``read_parquet``, ``read_csv``, ``read_json``, ``copy``, ``attach``,
    and ``glob`` calls. This prevents an LLM-driven path-traversal via
    user-supplied SQL.
 3. ``describe_qvd``/``sample_qvd`` take a ``view_name`` that must match
    an entry in state; raw filesystem paths never cross the tool boundary.
-4. ``query`` results are capped at ``max_query_rows`` (default 1000,
+4. ``run_sql`` results are capped at ``max_query_rows`` (default 1000,
    ceiling 10000) and a per-query timeout.
 
 The threat model is "curious LLM, not malicious adversary." A determined
@@ -128,7 +128,7 @@ def _entry_by_view(ctx: ServerContext, view_name: str) -> tuple[str, state_modul
 
 def _build_connection(config: Config, state: state_module.State) -> duckdb.DuckDBPyConnection:
     # Timeouts are applied per-query via ``conn.interrupt()`` from a timer
-    # thread inside ``query()``. DuckDB 1.x has no server-side statement
+    # thread inside ``run_sql()``. DuckDB 1.x has no server-side statement
     # timeout setting, so we enforce it in Python.
     conn = duckdb.connect(":memory:")
     for entry in state.entries.values():
@@ -311,7 +311,7 @@ def sample_qvd(view_name: str, n: int = 10) -> dict[str, Any]:
 sample_qvd = _with_auto_refresh(sample_qvd)
 
 
-def query(sql: str, max_rows: int = 1000) -> dict[str, Any]:
+def run_sql(sql: str, max_rows: int = 1000) -> dict[str, Any]:
     """Execute read-only SQL against the loaded views.
 
     ``max_rows`` defaults to 1000, hard-capped at 10000. Results beyond the
@@ -324,7 +324,7 @@ def query(sql: str, max_rows: int = 1000) -> dict[str, Any]:
             "error": {
                 "type": "Rejected",
                 "message": (
-                    "query uses a restricted function or statement (file-reading "
+                    "SQL uses a restricted function or statement (file-reading "
                     "table functions, ATTACH, COPY, LOAD, PRAGMA, etc.). Stick "
                     "to SELECT over the registered views."
                 ),
@@ -359,7 +359,7 @@ def query(sql: str, max_rows: int = 1000) -> dict[str, Any]:
     }
 
 
-query = _with_auto_refresh(query)
+run_sql = _with_auto_refresh(run_sql)
 
 
 def search_columns(term: str, case_sensitive: bool = False) -> list[dict[str, str]]:
@@ -413,7 +413,7 @@ def refresh() -> dict[str, Any]:
 
 # Register everything with FastMCP. Registering via direct call (not @decorator)
 # leaves the function names bound to the originals so tests can invoke them.
-for _fn in (list_qvds, describe_qvd, sample_qvd, query, search_columns, refresh):
+for _fn in (list_qvds, describe_qvd, sample_qvd, run_sql, search_columns, refresh):
     app.tool(_fn)
 
 

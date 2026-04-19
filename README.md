@@ -67,7 +67,7 @@ Run `qvd-mcp doctor` any time to see what's wired up and what isn't.
 | `list_qvds()` | List every loaded QVD with row/column counts and paths. |
 | `describe_qvd(view_name)` | Full schema for one view — column names and DuckDB types. |
 | `sample_qvd(view_name, n=10)` | First `n` rows of a view. Capped at 1000. |
-| `query(sql, max_rows=1000)` | Arbitrary read-only SQL across the views. Hard-capped at 10 000 rows. |
+| `run_sql(sql, max_rows=1000)` | Arbitrary read-only SQL across the views. Hard-capped at 10 000 rows. |
 | `search_columns(term)` | Substring match over column names across all views. |
 | `refresh()` | Run a conversion pass and re-register views. Useful after editing source QVDs. |
 
