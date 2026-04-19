@@ -33,31 +33,32 @@ pipx install qvd-mcp
 
 ## Quickstart
 
-1. Point `qvd-mcp` at a folder of QVDs and run a conversion pass:
+```bash
+# Interactive — prompts for source dir, patches Claude Desktop, runs first pass:
+uvx qvd-mcp setup
 
-   ```bash
-   uvx qvd-mcp convert --source ~/Documents/QVDs
-   ```
+# Non-interactive — for scripts or CI:
+uvx qvd-mcp setup --yes --source ~/Documents/QVDs
+```
 
-   This produces a Parquet cache in your platform cache directory and
-   prints a summary.
+Restart Claude Desktop and ask *"list the QVDs you can see"* to confirm.
 
-2. Wire it into Claude Desktop. Open your `claude_desktop_config.json`
-   (on macOS: `~/Library/Application Support/Claude/`) and add:
+Prefer to wire things by hand? `qvd-mcp convert --source ...` runs a single
+conversion pass and `qvd-mcp serve` boots the stdio server — then add this
+to your `claude_desktop_config.json`:
 
-   ```json
-   {
-     "mcpServers": {
-       "qvd": {
-         "command": "uvx",
-         "args": ["qvd-mcp", "serve"]
-       }
-     }
-   }
-   ```
+```json
+{
+  "mcpServers": {
+    "qvd": {
+      "command": "uvx",
+      "args": ["qvd-mcp", "serve"]
+    }
+  }
+}
+```
 
-   Then restart Claude Desktop. Ask it *"list the QVDs you can see"* to
-   check the wiring.
+Run `qvd-mcp doctor` any time to see what's wired up and what isn't.
 
 ## What the MCP server exposes
 
@@ -73,6 +74,22 @@ pipx install qvd-mcp
 View names come from filename stems, lowercased and normalized for SQL
 (e.g. `Sales 2024.qvd` becomes the view `sales_2024`), so you can type
 `SELECT * FROM sales_2024` without quoting.
+
+**Auto-refresh.** Before answering any tool call, the server checks source
+mtimes (debounced, default 10 s). If anything changed, it re-runs conversion
+and re-registers views, then answers. Set `auto_refresh_debounce_s = 0` in
+your config to disable and use the explicit `refresh()` tool instead.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `qvd-mcp setup` | Interactive wizard: config + Claude Desktop merge + first conversion. Add `--yes --source <path>` to script it. |
+| `qvd-mcp convert` | Run one QVD → Parquet conversion pass. |
+| `qvd-mcp serve` | Run the MCP server over stdio. This is what Claude Desktop invokes. |
+| `qvd-mcp doctor` | Nine diagnostic checks. Exit 0 all-pass, 1 any-fail, 2 config-broken. |
+| `qvd-mcp uninstall` | Remove the Claude Desktop entry. `--delete-cache` also drops the Parquet cache. Source QVDs are never touched. |
+| `qvd-mcp --version` | Print version and exit. |
 
 ## Architecture
 

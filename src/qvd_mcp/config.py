@@ -15,6 +15,7 @@ APP_NAME = "qvd-mcp"
 DEFAULT_MAX_QUERY_ROWS = 1000
 MAX_QUERY_ROW_CEILING = 10_000
 DEFAULT_QUERY_TIMEOUT_S = 30
+DEFAULT_AUTO_REFRESH_DEBOUNCE_S = 10
 
 
 def default_cache_dir() -> Path:
@@ -42,6 +43,7 @@ class Config:
     query_timeout_s: int = DEFAULT_QUERY_TIMEOUT_S
     log_level: str = "INFO"
     log_dir: Path = field(default_factory=default_log_dir)
+    auto_refresh_debounce_s: int = DEFAULT_AUTO_REFRESH_DEBOUNCE_S
 
     def parquet_path_for(self, view_name: str) -> Path:
         return self.cache_dir / f"{view_name}.parquet"
@@ -111,6 +113,9 @@ def load(
     timeout = _coerce_int(raw, "query_timeout_s", DEFAULT_QUERY_TIMEOUT_S)
     timeout = max(1, timeout)
 
+    debounce = _coerce_int(raw, "auto_refresh_debounce_s", DEFAULT_AUTO_REFRESH_DEBOUNCE_S)
+    debounce = max(0, debounce)
+
     log_level = (log_level_override or _coerce_str(raw, "log_level") or "INFO").upper()
 
     return Config(
@@ -120,4 +125,5 @@ def load(
         max_query_rows=max_rows,
         query_timeout_s=timeout,
         log_level=log_level,
+        auto_refresh_debounce_s=debounce,
     )

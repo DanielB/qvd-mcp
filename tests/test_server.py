@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import dataclasses
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from pyqvd import DoubleValue, IntegerValue, QvdTable
 
 from qvd_mcp import server as server_module
 from qvd_mcp import state as state_module
@@ -167,3 +170,67 @@ def test_refresh_runs_conversion(loaded_ctx: server_module.ServerContext) -> Non
     result = server_module.refresh()
     assert "summary" in result
     assert result["failed"] == 0
+
+
+def _rewrite_plain_numbers(path: Path) -> None:
+    """Overwrite ``plain_numbers.qvd`` with different content so mtime+size shift."""
+    table = QvdTable.from_dict(
+        {
+            "columns": ["id", "value"],
+            "data": [[IntegerValue(i), DoubleValue(i * 2.5)] for i in range(1, 11)],
+        }
+    )
+    table.to_qvd(str(path))
+
+
+def test_auto_refresh_triggers_on_mtime_change(
+    loaded_ctx: server_module.ServerContext,
+) -> None:
+    src_key = str(loaded_ctx.config.source_dir / "plain_numbers.qvd")
+    original_mtime = loaded_ctx.state.entries[src_key].source_mtime_ns
+
+    time.sleep(0.02)  # APFS can coalesce mtimes; nudge past the resolution floor
+    _rewrite_plain_numbers(Path(src_key))
+    server_module._last_check = 0.0  # force a re-probe on the next tool call
+
+    server_module.list_qvds()
+
+    refreshed_entry = loaded_ctx.state.entries[src_key]
+    assert refreshed_entry.source_mtime_ns != original_mtime
+
+
+def test_auto_refresh_debounced(loaded_ctx: server_module.ServerContext) -> None:
+    src_key = str(loaded_ctx.config.source_dir / "plain_numbers.qvd")
+    original_mtime = loaded_ctx.state.entries[src_key].source_mtime_ns
+
+    # Pretend we just finished a probe — next call should bail on the debounce.
+    server_module._last_check = time.monotonic()
+
+    time.sleep(0.02)
+    _rewrite_plain_numbers(Path(src_key))
+
+    server_module.list_qvds()
+    assert loaded_ctx.state.entries[src_key].source_mtime_ns == original_mtime
+
+    # Push the last-check timestamp past the debounce window; the next call
+    # should now pick up the drift and refresh.
+    server_module._last_check = time.monotonic() - (
+        loaded_ctx.config.auto_refresh_debounce_s + 1
+    )
+    server_module.list_qvds()
+    assert loaded_ctx.state.entries[src_key].source_mtime_ns != original_mtime
+
+
+def test_auto_refresh_disabled_when_debounce_zero(
+    loaded_ctx: server_module.ServerContext,
+) -> None:
+    loaded_ctx.config = dataclasses.replace(loaded_ctx.config, auto_refresh_debounce_s=0)
+    src_key = str(loaded_ctx.config.source_dir / "plain_numbers.qvd")
+    original_mtime = loaded_ctx.state.entries[src_key].source_mtime_ns
+
+    server_module._last_check = 0.0
+    time.sleep(0.02)
+    _rewrite_plain_numbers(Path(src_key))
+
+    server_module.list_qvds()
+    assert loaded_ctx.state.entries[src_key].source_mtime_ns == original_mtime

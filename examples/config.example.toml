@@ -25,3 +25,6 @@ source_dir = "/Users/you/Documents/QVDs"
 
 # Optional. Log level: DEBUG, INFO, WARNING, ERROR.
 # log_level = "INFO"
+
+# Optional. Debounce window (seconds) for lazy auto-refresh; 0 disables.
+# auto_refresh_debounce_s = 10

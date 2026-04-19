@@ -24,12 +24,15 @@ tool could leak; we just want to avoid accidental foot-guns.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import Any, ParamSpec, TypeVar
 
 import duckdb
 from fastmcp import FastMCP
@@ -73,6 +76,14 @@ class ServerContext:
 
 
 _ctx: ServerContext | None = None
+
+# Tracks the last time ``_refresh_if_stale`` did a source-changed probe. Shared
+# across tool calls so a burst of requests triggers at most one ``stat()`` sweep
+# per debounce window.
+_last_check: float = 0.0
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 def _get_ctx() -> ServerContext:
@@ -150,6 +161,67 @@ def _rebuild_views(ctx: ServerContext) -> None:
         )
 
 
+def _any_source_changed(ctx: ServerContext) -> bool:
+    """Cheap check for whether the source QVDs on disk drifted from state.
+
+    Compares ``(mtime_ns, size)`` per known entry and scans ``source_dir`` for
+    any new ``*.qvd`` that isn't tracked yet. A missing/unstat-able source is
+    also "changed" — the conversion pass will prune it.
+    """
+    for src_key, entry in ctx.state.entries.items():
+        try:
+            st = Path(src_key).stat()
+        except OSError:
+            return True
+        if st.st_mtime_ns != entry.source_mtime_ns or st.st_size != entry.source_size:
+            return True
+
+    # Path-key invariant: state keys and our rglob strings must match character
+    # for character. ``convert.run_once`` iterates the same rglob and stores
+    # ``str(qvd_path)`` without ``.resolve()``; keep both sides unresolved or
+    # every tool call will trigger a full refresh.
+    known = set(ctx.state.entries)
+    try:
+        for qvd in ctx.config.source_dir.rglob("*.qvd"):
+            if str(qvd) not in known:
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _refresh_if_stale(ctx: ServerContext) -> None:
+    """Run a conversion pass if source QVDs drifted since the last probe.
+
+    Gated by ``ctx.config.auto_refresh_debounce_s``; ``0`` disables the feature.
+    """
+    global _last_check
+    if ctx.config.auto_refresh_debounce_s <= 0:
+        return
+    now = time.monotonic()
+    if now - _last_check < ctx.config.auto_refresh_debounce_s:
+        return
+    _last_check = now
+    if not _any_source_changed(ctx):
+        return
+    report = run_once(ctx.config)
+    ctx.state = state_module.load(ctx.config.cache_dir)
+    _rebuild_views(ctx)
+    ctx._counts.clear()
+    log.info("auto-refresh: %s", report.summary())
+
+
+def _with_auto_refresh(fn: Callable[P, R]) -> Callable[P, R]:
+    """Decorate a tool function so it probes for stale source QVDs first."""
+
+    @functools.wraps(fn)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        _refresh_if_stale(_get_ctx())
+        return fn(*args, **kwargs)
+
+    return wrapped
+
+
 # ---------------------------------------------------------------------------
 # Tool implementations (plain functions; registered at module bottom)
 # ---------------------------------------------------------------------------
@@ -174,6 +246,9 @@ def list_qvds() -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+list_qvds = _with_auto_refresh(list_qvds)
 
 
 def describe_qvd(view_name: str) -> dict[str, Any]:
@@ -204,6 +279,9 @@ def describe_qvd(view_name: str) -> dict[str, Any]:
     }
 
 
+describe_qvd = _with_auto_refresh(describe_qvd)
+
+
 def sample_qvd(view_name: str, n: int = 10) -> dict[str, Any]:
     """Return the first ``n`` rows of a view (capped at 1000).
 
@@ -228,6 +306,9 @@ def sample_qvd(view_name: str, n: int = 10) -> dict[str, Any]:
         "rows": [dict(zip(cols, row, strict=False)) for row in rows],
         "row_count": len(rows),
     }
+
+
+sample_qvd = _with_auto_refresh(sample_qvd)
 
 
 def query(sql: str, max_rows: int = 1000) -> dict[str, Any]:
@@ -278,6 +359,9 @@ def query(sql: str, max_rows: int = 1000) -> dict[str, Any]:
     }
 
 
+query = _with_auto_refresh(query)
+
+
 def search_columns(term: str, case_sensitive: bool = False) -> list[dict[str, str]]:
     """Fuzzy-substring match column names across all views.
 
@@ -302,6 +386,9 @@ def search_columns(term: str, case_sensitive: bool = False) -> list[dict[str, st
                     }
                 )
     return hits
+
+
+search_columns = _with_auto_refresh(search_columns)
 
 
 def refresh() -> dict[str, Any]:
