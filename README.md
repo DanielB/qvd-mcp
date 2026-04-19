@@ -391,7 +391,6 @@ commented skeleton.
 | --- | --- | --- |
 | `source_dir` | *(required)* | Directory of QVDs to scan recursively. |
 | `cache_dir` | platformdirs user cache | Where the Parquet cache and state sidecar live. |
-| `reader` | `"pyqvd"` | QVD parser backend. Only `pyqvd` ships in this release. |
 | `max_query_rows` | `1000` | Default `run_sql` row cap. Hard ceiling is 10 000. |
 | `query_timeout_s` | `30` | Per-query timeout; `conn.interrupt()` fires when it expires. |
 | `log_level` | `"INFO"` | `DEBUG` / `INFO` / `WARNING` / `ERROR`. |

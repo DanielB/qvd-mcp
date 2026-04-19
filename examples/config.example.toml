@@ -14,9 +14,6 @@ source_dir = "/Users/you/Documents/QVDs"
 # from platformdirs (e.g. ~/Library/Caches/qvd-mcp on macOS).
 # cache_dir = "/Users/you/.cache/qvd-mcp"
 
-# Optional. The QVD reader library. Only "pyqvd" is supported in this release.
-# reader = "pyqvd"
-
 # Optional. Hard ceiling on rows returned by the `run_sql` MCP tool (max 10000).
 # max_query_rows = 1000
 

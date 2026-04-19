@@ -40,7 +40,6 @@ class ConfigError(Exception):
 class Config:
     source_dir: Path
     cache_dir: Path
-    reader: str = "pyqvd"
     max_query_rows: int = DEFAULT_MAX_QUERY_ROWS
     query_timeout_s: int = DEFAULT_QUERY_TIMEOUT_S
     log_level: str = "INFO"
@@ -124,11 +123,11 @@ def load(
         else default_cache_dir()
     )
 
-    reader = _coerce_str(raw, "reader") or "pyqvd"
-    if reader != "pyqvd":
-        raise ConfigError(
-            f"unknown reader '{reader}'. Only 'pyqvd' is supported in this release."
-        )
+    # ``reader`` used to be a config option pointing at a backend (pyqvd vs
+    # a planned qvd-rs). We only ship one backend and the Rust alternative
+    # isn't currently viable (stale upstream, no Python 3.13 / arm64 wheels),
+    # so the dispatch layer was removed. A ``reader`` key in existing
+    # configs is silently ignored.
 
     max_rows = _coerce_int(raw, "max_query_rows", DEFAULT_MAX_QUERY_ROWS)
     max_rows = max(1, min(max_rows, MAX_QUERY_ROW_CEILING))
@@ -155,7 +154,6 @@ def load(
     return Config(
         source_dir=source_dir,
         cache_dir=cache_dir,
-        reader=reader,
         max_query_rows=max_rows,
         query_timeout_s=timeout,
         log_level=log_level,

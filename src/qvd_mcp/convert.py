@@ -17,10 +17,12 @@ import pyarrow.parquet as pq
 
 from qvd_mcp import naming, state
 from qvd_mcp.config import Config
-from qvd_mcp.readers import Reader, ReaderError
+from qvd_mcp.readers import ReaderError
 from qvd_mcp.readers.pyqvd_reader import PyQvdReader
 
 log = logging.getLogger(__name__)
+
+READER_NAME = "pyqvd"
 
 
 @dataclass
@@ -41,16 +43,9 @@ class ConvertReport:
         )
 
 
-def _get_reader(name: str) -> Reader:
-    if name == "pyqvd":
-        return PyQvdReader()
-    raise ValueError(f"unknown reader: {name!r}")
-
-
-def _reader_version(name: str) -> str:
-    pkg = {"pyqvd": "pyqvd"}.get(name, name)
+def _pyqvd_version() -> str:
     try:
-        return version(pkg)
+        return version("pyqvd")
     except PackageNotFoundError:
         return ""
 
@@ -96,7 +91,7 @@ def run_once(config: Config) -> ConvertReport:
     Skip-if-unchanged uses ``(mtime_ns, size)`` only — cheap, and plenty
     accurate for QVDs in practice.
     """
-    reader = _get_reader(config.reader)
+    reader = PyQvdReader()
     config.cache_dir.mkdir(parents=True, exist_ok=True)
 
     prior = state.load(config.cache_dir)
@@ -191,8 +186,8 @@ def run_once(config: Config) -> ConvertReport:
 
     new_state = state.State(
         schema_version=state.SCHEMA_VERSION,
-        reader=config.reader,
-        reader_version=_reader_version(config.reader),
+        reader=READER_NAME,
+        reader_version=_pyqvd_version(),
         entries=new_entries,
     )
     state.save(config.cache_dir, new_state)
