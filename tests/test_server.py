@@ -80,9 +80,64 @@ def test_query_rejects_read_parquet(loaded_ctx: server_module.ServerContext) -> 
     assert result.get("error", {}).get("type") == "Rejected"
 
 
+def test_query_rejects_read_text(loaded_ctx: server_module.ServerContext) -> None:
+    # DuckDB's read_text lets you slurp arbitrary files as a single row.
+    # This is the bug the code reviewer flagged — it MUST be rejected.
+    result = server_module.query("SELECT * FROM read_text('/etc/hostname')")
+    assert result.get("error", {}).get("type") == "Rejected"
+
+
+def test_query_rejects_read_blob(loaded_ctx: server_module.ServerContext) -> None:
+    result = server_module.query("SELECT * FROM read_blob('/etc/hostname')")
+    assert result.get("error", {}).get("type") == "Rejected"
+
+
 def test_query_rejects_attach(loaded_ctx: server_module.ServerContext) -> None:
     result = server_module.query("ATTACH '/tmp/something.db' AS foo")
     assert result.get("error", {}).get("type") == "Rejected"
+
+
+def test_query_rejects_copy_statement(loaded_ctx: server_module.ServerContext) -> None:
+    result = server_module.query("COPY plain_numbers TO '/tmp/x.csv'")
+    assert result.get("error", {}).get("type") == "Rejected"
+
+
+def test_query_allows_reserved_words_as_identifiers(loaded_ctx: server_module.ServerContext) -> None:
+    # ``load``, ``copy``, ``glob`` used to false-positive because the regex
+    # matched them as bare words. They're legal SQL aliases and likely
+    # business column names; they should pass through when not in
+    # function-call or statement-prefix position.
+    result = server_module.query("SELECT 1 AS load, 2 AS copy, 3 AS glob, 4 AS pragma")
+    assert "error" not in result
+    assert result["rows"][0] == {"load": 1, "copy": 2, "glob": 3, "pragma": 4}
+
+
+def test_query_allows_semicolon_terminated_select(loaded_ctx: server_module.ServerContext) -> None:
+    # Trailing semicolon shouldn't trip the statement-form regex.
+    result = server_module.query("SELECT 1 AS x;")
+    assert "error" not in result
+
+
+def test_query_timeout_returns_clean_error(
+    loaded_ctx: server_module.ServerContext,
+) -> None:
+    # Verify the error-shape contract for InterruptException without relying
+    # on a reliably-slow query. We swap the connection for a stub that
+    # raises InterruptException on ``execute`` — the same exception type
+    # ``conn.interrupt()`` triggers in production.
+    import duckdb
+
+    class _InterruptingConn:
+        def execute(self, _sql: str) -> object:
+            raise duckdb.InterruptException("INTERRUPT Error: Interrupted!")
+
+        def interrupt(self) -> None:
+            pass
+
+    loaded_ctx.conn = _InterruptingConn()  # type: ignore[assignment]
+    result = server_module.query("SELECT 1")
+    assert result.get("error", {}).get("type") == "Timeout"
+    assert "exceeded" in result["error"]["message"]
 
 
 def test_query_syntax_error_returns_clean_message(loaded_ctx: server_module.ServerContext) -> None:

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,14 +42,26 @@ log = logging.getLogger(__name__)
 
 app: FastMCP = FastMCP("qvd-mcp")
 
-# Any user-supplied SQL containing these tokens gets rejected. Bypasses exist
-# (quoting tricks, macros) but the goal is "stop LLM foot-guns," not
-# cryptographic isolation.
-_FORBIDDEN = re.compile(
-    r"\b(read_parquet|read_csv|read_json|parquet_scan|csv_scan|"
-    r"copy|attach|detach|load|install|pragma|glob)\b",
+# Reject user SQL that reads files from disk or opens external databases.
+# Two shapes: function-call form (block only when followed by `(`), and
+# statement-start form (block only at the top of a statement). This keeps
+# legitimate column names like ``copy``, ``load``, ``glob`` usable — real
+# Qlik data has columns with those names — while still catching the
+# DuckDB table functions and DDL that would let a curious LLM read
+# /etc/passwd or attach an arbitrary database.
+_FORBIDDEN_FUNCTIONS = re.compile(
+    r"\b(?:read_text|read_blob|read_parquet|read_csv|read_csv_auto|read_json|"
+    r"read_json_auto|parquet_scan|csv_scan|glob|read_ndjson|read_ndjson_auto)\s*\(",
     re.IGNORECASE,
 )
+_FORBIDDEN_STATEMENTS = re.compile(
+    r"(?:^|;)\s*(?:attach|detach|copy|install|load|pragma|export|import)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_rejected(sql: str) -> bool:
+    return bool(_FORBIDDEN_FUNCTIONS.search(sql) or _FORBIDDEN_STATEMENTS.search(sql))
 
 
 @dataclass
@@ -103,6 +116,9 @@ def _entry_by_view(ctx: ServerContext, view_name: str) -> tuple[str, state_modul
 
 
 def _build_connection(config: Config, state: state_module.State) -> duckdb.DuckDBPyConnection:
+    # Timeouts are applied per-query via ``conn.interrupt()`` from a timer
+    # thread inside ``query()``. DuckDB 1.x has no server-side statement
+    # timeout setting, so we enforce it in Python.
     conn = duckdb.connect(":memory:")
     for entry in state.entries.values():
         parquet = config.cache_dir / entry.parquet_path
@@ -222,25 +238,37 @@ def query(sql: str, max_rows: int = 1000) -> dict[str, Any]:
     filesystem-reading functions are rejected.
     """
     ctx = _get_ctx()
-    if _FORBIDDEN.search(sql):
+    if _is_rejected(sql):
         return {
             "error": {
                 "type": "Rejected",
                 "message": (
-                    "query uses a restricted function (read_parquet, copy, "
-                    "attach, pragma, etc.). Stick to SELECT over the "
-                    "registered views."
+                    "query uses a restricted function or statement (file-reading "
+                    "table functions, ATTACH, COPY, LOAD, PRAGMA, etc.). Stick "
+                    "to SELECT over the registered views."
                 ),
             }
         }
     limit = max(1, min(int(max_rows), MAX_QUERY_ROW_CEILING))
+    timeout_s = ctx.config.query_timeout_s
+    timer = threading.Timer(timeout_s, ctx.conn.interrupt)
+    timer.start()
     try:
         rel = ctx.conn.execute(sql)
+        cols = [d[0] for d in rel.description]
+        rows = rel.fetchmany(limit)
+        truncated = len(rows) == limit and rel.fetchone() is not None
+    except duckdb.InterruptException:
+        return {
+            "error": {
+                "type": "Timeout",
+                "message": f"query exceeded {timeout_s}s and was cancelled",
+            }
+        }
     except duckdb.Error as exc:
         return {"error": {"type": exc.__class__.__name__, "message": str(exc)}}
-    cols = [d[0] for d in rel.description]
-    rows = rel.fetchmany(limit)
-    truncated = len(rows) == limit and rel.fetchone() is not None
+    finally:
+        timer.cancel()
     return {
         "columns": cols,
         "rows": [dict(zip(cols, r, strict=False)) for r in rows],
