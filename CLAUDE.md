@@ -10,15 +10,19 @@ Public pitch: "Query QVD files directly from disk with SQL and AI."
 
 ## Phase status
 
-- **Phase 1 — shipped.** Core converter + MCP server + minimal CLI
-  (`convert`, `serve`, `--version`). 44 tests + security fixes landed.
-- **Phase 2 — in progress.** Lazy auto-refresh inside the server,
-  Claude Desktop config merge, `setup` / `doctor` / `uninstall` commands.
-  Plan: `/Users/daniel/.claude/plans/now-go-through-this-nested-kahan.md`.
-- **Phase 3 — deferred.** CI matrix, PyPI trusted publishing, public
-  repo flip, CHANGELOG, CONTRIBUTING, SECURITY, demo GIF.
-- **Phase 4 — deferred.** `qvd-rs` reader extra, S3 / Azure / SharePoint
-  backends, advanced server features.
+- **Phase 1 — shipped.** Core converter + MCP server + minimal CLI.
+- **Phase 2 — shipped.** Lazy auto-refresh, Claude Desktop config
+  merge, `setup` / `doctor` / `uninstall` commands, local-dev
+  checkout detection, canonical `qvd-mcp` server key, `run_sql` tool.
+- **Phase 3 — mostly shipped.** Expanded README, CHANGELOG,
+  CONTRIBUTING, SECURITY, Contributor Covenant, issue/PR templates,
+  GitHub Actions CI matrix (3 OS × 3 Python, all green), Dependabot,
+  OIDC-ready `release.yml` workflow, repo **public** at
+  <https://github.com/DanielB/qvd-mcp>.
+  Still pending: PyPI trusted publisher registration (blocked on
+  email verification), tag `v0.1.0`, first published release.
+- **Phase 4 — deferred.** `qvd-rs` reader extra, S3 / Azure /
+  SharePoint backends, advanced server features.
 
 ## Conventions (enforced by tests and lint)
 
