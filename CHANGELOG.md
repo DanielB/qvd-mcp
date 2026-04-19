@@ -64,8 +64,36 @@ command.
   `threading.Timer` that calls `conn.interrupt()` when the window
   expires; DuckDB 1.x has no server-side statement timeout.
 - **Clean stdout discipline.** The MCP server logs only to stderr so
-  the stdio JSON-RPC stream stays uncontaminated; FastMCP's banner
-  and PyPI update check are both disabled at startup.
+  the stdio JSON-RPC stream stays uncontaminated.
+- **Local-dev checkout detection in `setup`.** Walks up from CWD
+  looking for a `pyproject.toml` whose `[project].name` is `qvd-mcp`;
+  when found, writes the `uv --directory <path> run qvd-mcp serve`
+  form into Claude Desktop so pre-PyPI installs work end-to-end.
+  Falls back to `uvx qvd-mcp serve` once the package is on PyPI.
+- **Windows MSIX-packaged Claude Desktop support.** Claude Desktop's
+  Microsoft Store / MSIX build virtualises `%APPDATA%` into
+  `%LOCALAPPDATA%\Packages\Claude_<suffix>\LocalCache\Roaming\...`.
+  `claude_config` detects the packaged install and co-writes to both
+  the packaged and unpackaged locations, so either flavour picks up
+  the entry transparently.
+- **Preserves existing Claude Desktop entries.** Setup never removes
+  user-placed entries — not even a legacy `qvd` key from a pre-rename
+  release. Only `uninstall` removes qvd-mcp-owned entries, and it
+  removes both the canonical `qvd-mcp` key and the legacy `qvd` key
+  so pre-rename installs clean up fully.
+
+### Changed
+
+- **Depend on the official `mcp` SDK directly** (using
+  `mcp.server.fastmcp.FastMCP`) instead of the standalone `fastmcp`
+  2.x package. Same decorator-based surface; around 45 fewer
+  transitive dependencies on a fresh install (~98 → ~53 packages).
+- **SQL tool renamed from `query` to `run_sql`.** The old name
+  collided with built-in concepts in some MCP clients (tools named
+  `query` were occasionally filtered from surfaced tool lists).
+  `run_sql` follows the verb-phrase pattern of the other tools.
+- **Canonical Claude Desktop server key is `qvd-mcp`** (matches the
+  package name), not `qvd`. Legacy entries are left alone on upgrade.
 
 ### Known limitations
 

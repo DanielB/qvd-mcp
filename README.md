@@ -21,40 +21,59 @@ client — Claude Desktop, Claude Code, Cursor, and friends — via DuckDB.
 
 ## Install
 
-Requires Python 3.11 or newer.
+Requires Python 3.11 or newer plus [uv](https://docs.astral.sh/uv/).
+
+`qvd-mcp` is **pre-release** — not on PyPI yet. Install directly from this
+git repository:
 
 ```bash
-# Zero-install (recommended for trying it out):
-uvx qvd-mcp --help
+# One-shot CLI (no clone — uvx builds a temp venv):
+uvx --from git+https://github.com/DanielB/qvd-mcp qvd-mcp --version
 
-# Persistent install:
-pipx install qvd-mcp
+# Or clone the repo — required if you want the setup wizard to auto-wire
+# Claude Desktop at the correct local-dev command:
+git clone https://github.com/DanielB/qvd-mcp
+cd qvd-mcp
+uv sync
 ```
+
+Once `v0.1.0` ships on PyPI, the simpler `uvx qvd-mcp ...` and
+`pipx install qvd-mcp` forms will work.
 
 ## Quickstart
 
+From inside a cloned checkout:
+
 ```bash
 # Interactive — prompts for source dir, patches Claude Desktop, runs first pass:
-uvx qvd-mcp setup
+uvx --from . qvd-mcp setup
 
 # Non-interactive — for scripts or CI:
-uvx qvd-mcp setup --yes --source ~/Documents/QVDs
+uvx --from . qvd-mcp setup --yes --source ~/Documents/QVDs
 ```
 
 Restart Claude Desktop and ask *"list the QVDs you can see"* to confirm the
 wiring. Claude Desktop caches the MCP tool list at connect time, so a fresh
 launch after `setup` is what makes the server visible.
 
+Setup detects whether you're running from a local checkout and writes the
+appropriate Claude Desktop command — either `uvx qvd-mcp serve`
+(post-PyPI) or `uv --directory /path/to/qvd-mcp run qvd-mcp serve`
+(pre-PyPI / local dev). On Windows, it co-writes to both the MSIX-packaged
+and unpackaged Claude Desktop config locations so either install variant
+picks up the entry transparently.
+
 Prefer to wire things by hand? `qvd-mcp convert --source ...` runs a single
-conversion pass and `qvd-mcp serve` boots the stdio server — then add this
-to your `claude_desktop_config.json`:
+conversion pass and `qvd-mcp serve` boots the stdio server — then add the
+equivalent of the following to your `claude_desktop_config.json` (pick
+whichever matches your environment):
 
 ```json
 {
   "mcpServers": {
     "qvd-mcp": {
       "command": "uvx",
-      "args": ["qvd-mcp", "serve"]
+      "args": ["--from", "git+https://github.com/DanielB/qvd-mcp", "qvd-mcp", "serve"]
     }
   }
 }
