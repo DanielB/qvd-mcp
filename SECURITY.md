@@ -10,8 +10,10 @@ Pre-1.0; fixes ship on the current minor.
 
 ## Reporting
 
-Email **d.bengtsson@gmail.com** for suspected vulnerabilities. Do not
-open a public issue — it exposes other users until a fix ships.
+Open a **[private security advisory](https://github.com/DanielB/qvd-mcp/security/advisories/new)**
+for suspected vulnerabilities. That channel is readable only by the
+maintainer and keeps the report private until a fix ships. Do not open
+a public issue — it exposes other users in the meantime.
 
 A useful report includes:
 
