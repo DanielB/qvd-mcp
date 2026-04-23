@@ -76,6 +76,55 @@ whichever matches your environment):
 
 Run `qvd-mcp doctor` any time to see what's wired up and what isn't.
 
+## Sharing a converted cache
+
+A parquet cache produced by `qvd-mcp` on one machine can be used on another
+machine that does **not** have the source QVDs. Useful when one person owns
+the conversion and the rest of the team only needs to query.
+
+### Producer
+
+```bash
+qvd-mcp setup            # interactive, answer "yes" to the QVD question
+# ... cache is built in, e.g., ~/Library/Caches/qvd-mcp (macOS)
+#                         ~/.cache/qvd-mcp              (Linux)
+#                         %LOCALAPPDATA%\qvd-mcp\Cache  (Windows)
+
+# Package the cache for a colleague — any zip tool works:
+cd ~/Library/Caches && zip -r ~/Desktop/qvd-mcp-cache.zip qvd-mcp
+```
+
+### Consumer
+
+```bash
+# Extract the zip somewhere local
+mkdir -p ~/qvd-mcp-cache
+cd ~/qvd-mcp-cache && unzip ~/Downloads/qvd-mcp-cache.zip
+
+# Point setup at the extracted folder; answer "no" to the QVD question
+qvd-mcp setup
+#   Where is the shared cache folder? ~/qvd-mcp-cache/qvd-mcp
+```
+
+Non-interactive alternative:
+
+```bash
+qvd-mcp setup --yes --cache ~/qvd-mcp-cache/qvd-mcp
+# No --source given → consumer mode. Skips conversion. Cache must already
+# contain *.parquet files.
+```
+
+### How it works
+
+The cache uses Parquet (an open format). The consumer's `qvd-mcp serve`
+registers DuckDB views directly from the parquet files; no QVD-specific
+tooling is needed on the consumer's side. Auto-refresh is automatically
+disabled when `source_dir` is unset — nothing to probe.
+
+If the consumer later gets new parquets (e.g. the producer drops them
+into a shared Dropbox/OneDrive folder both machines point at), restart
+the server to pick them up.
+
 ## How it works
 
 ```
@@ -377,14 +426,14 @@ Expected shape:
 ## Configuration
 
 Configuration lives at `~/.config/qvd-mcp/config.toml` on macOS and
-Linux and `%APPDATA%\qvd-mcp\config.toml` on Windows. The only required
-field is `source_dir`; everything else has a sensible default. See
+Linux and `%APPDATA%\qvd-mcp\config.toml` on Windows. Every field has a
+sensible default. See
 [`examples/config.example.toml`](examples/config.example.toml) for a
 commented skeleton.
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `source_dir` | *(required)* | Directory of QVDs to scan recursively. |
+| `source_dir` | *(optional — unset means cache-only)* | Directory of QVDs to scan recursively. |
 | `cache_dir` | platformdirs user cache | Where the Parquet cache and state sidecar live. |
 | `max_query_rows` | `1000` | Default `run_sql` row cap. Hard ceiling is 10 000. |
 | `query_timeout_s` | `30` | Per-query timeout; `conn.interrupt()` fires when it expires. |
