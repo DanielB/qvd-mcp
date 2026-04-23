@@ -92,9 +92,20 @@ def discover_qvds(config: Config) -> list[Path]:
 def run_once(config: Config) -> ConvertReport:
     """One full conversion pass over ``config.source_dir``.
 
+    No-op when ``source_dir`` is unset: cache-only mode has no QVDs to
+    convert, and the orphan-prune loop would otherwise misinterpret the
+    empty file list as "every cached parquet has been deleted" and wipe
+    the consumer's cache.
+
     Skip-if-unchanged uses ``(mtime_ns, size)`` only — cheap, and plenty
     accurate for QVDs in practice.
     """
+    if config.source_dir is None:
+        log.info(
+            "run_once called with source_dir=None; cache-only mode, nothing to do."
+        )
+        return ConvertReport()
+
     reader = PyQvdReader()
     config.cache_dir.mkdir(parents=True, exist_ok=True)
 
