@@ -20,7 +20,15 @@ log = logging.getLogger(__name__)
 APP_NAME = "qvd-mcp"
 DEFAULT_MAX_QUERY_ROWS = 1000
 MAX_QUERY_ROW_CEILING = 30_000
-RECOMMENDED_QUERY_ROW_CEILING = 10_000
+RECOMMENDED_QUERY_BYTES = 500_000
+"""Soft threshold for ``run_sql`` response size (JSON bytes, ~125k tokens).
+
+Chosen as the honest measure of user-visible cost: a 30 000-row query on
+three narrow numeric columns serializes to ~900 KB and warrants a warning;
+the same 30 000-row query on tiny 2-column integer data comes in well
+under 500 KB and doesn't. Row count alone would over-warn on the second
+case and under-warn on text-heavy schemas. See ``server.run_sql``.
+"""
 DEFAULT_QUERY_TIMEOUT_S = 30
 DEFAULT_AUTO_REFRESH_DEBOUNCE_S = 10
 DEFAULT_INCLUDE: tuple[str, ...] = ("*.qvd",)

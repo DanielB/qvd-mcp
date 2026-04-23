@@ -335,13 +335,15 @@ run_sql(sql: str, max_rows: int = 1000) -> dict
 
 Execute arbitrary read-only SQL across the registered views. `max_rows`
 defaults to 1000 and is hard-capped at 30 000; anything beyond the cap
-is truncated and `truncated: true` is returned. Results exceeding the
-recommended 10 000-row threshold carry an extra `warning` field in the
-response nudging toward aggregation — large result sets inflate LLM
-context. SQL that touches filesystem-reading functions or DDL statements
-is rejected with a `Rejected` error — see [SECURITY.md](SECURITY.md) for
-the list. Per-query timeout defaults to 30 seconds and cancels the query
-via `conn.interrupt()`.
+is truncated and `truncated: true` is returned. Responses whose
+JSON-serialized size exceeds the recommended **500 KB** (≈125 k tokens)
+carry an extra `warning` field pointing at aggregation — the byte
+measure is honest about what the user will feel in their LLM context,
+so 20 000 rows of narrow numeric data stays silent while 1 000 rows of
+long text columns will warn. SQL that touches filesystem-reading
+functions or DDL statements is rejected with a `Rejected` error — see
+[SECURITY.md](SECURITY.md) for the list. Per-query timeout defaults to
+30 seconds and cancels the query via `conn.interrupt()`.
 
 Example invocation:
 

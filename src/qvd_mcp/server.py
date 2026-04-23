@@ -20,10 +20,13 @@ Safety model (Phase 1):
 3. ``describe_qvd``/``sample_qvd`` take a ``view_name`` that must match
    an entry in state; raw filesystem paths never cross the tool boundary.
 4. ``run_sql`` results are capped at ``max_query_rows`` (default 1000,
-   hard ceiling 30000) and a per-query timeout. Results exceeding
-   ``RECOMMENDED_QUERY_ROW_CEILING`` (10000) get a ``warning`` field in
-   the response so the LLM is nudged toward aggregation rather than
-   bulk row exfiltration.
+   hard ceiling 30000) and a per-query timeout. Responses whose
+   JSON-serialized size exceeds ``RECOMMENDED_QUERY_BYTES`` (500 KB)
+   get a ``warning`` field nudging toward aggregation. Measuring the
+   actual response size — rather than a row-count proxy — gives users
+   an honest signal: a narrow numeric query of 20000 rows is cheap and
+   won't warn, while 1000 rows of long text columns can easily cross
+   the threshold and will.
 
 The threat model is "curious LLM, not malicious adversary." A determined
 attacker with shell access to the same machine already has everything the
@@ -32,6 +35,7 @@ tool could leak; we just want to avoid accidental foot-guns.
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import re
 import threading
@@ -47,7 +51,7 @@ from mcp.server.fastmcp import FastMCP
 from qvd_mcp import state as state_module
 from qvd_mcp.config import (
     MAX_QUERY_ROW_CEILING,
-    RECOMMENDED_QUERY_ROW_CEILING,
+    RECOMMENDED_QUERY_BYTES,
     Config,
 )
 from qvd_mcp.convert import discover_qvds, run_once
@@ -347,10 +351,12 @@ def run_sql(sql: str, max_rows: int = 1000) -> dict[str, Any]:
     """Execute read-only SQL against the loaded views.
 
     ``max_rows`` defaults to 1000, hard-capped at 30000. Results beyond the
-    cap are truncated and ``truncated=True`` is set. Results exceeding the
-    recommended 10000-row threshold carry a ``warning`` field suggesting
-    aggregation — large result sets inflate the LLM's context window.
-    Queries touching filesystem-reading functions are rejected.
+    cap are truncated and ``truncated=True`` is set. Responses whose
+    JSON-serialized size exceeds the recommended 500 KB threshold carry a
+    ``warning`` field suggesting aggregation — the byte measure is honest
+    about what the user will feel in their context window, independent of
+    row count and column width. Queries touching filesystem-reading
+    functions are rejected.
     """
     ctx = _get_ctx()
     if _is_rejected(sql):
@@ -392,11 +398,22 @@ def run_sql(sql: str, max_rows: int = 1000) -> dict[str, Any]:
         "row_count": len(rows),
         "truncated": truncated,
     }
-    if len(rows) > RECOMMENDED_QUERY_ROW_CEILING:
+    # Byte-count warning: measure the actual JSON the caller will receive
+    # so the threshold tracks what the user feels in their context window,
+    # not a row-count proxy. ``default=str`` mirrors how pydantic would
+    # serialize non-JSON-native types (datetime, Decimal) downstream.
+    response_bytes = len(json.dumps(response, default=str))
+    if response_bytes > RECOMMENDED_QUERY_BYTES:
+        # Decimal KB (bytes // 1000) so the displayed threshold matches the
+        # constant's literal value. Token estimate uses ~4 bytes/token, which
+        # is typical for structured JSON under Claude's tokenizer.
         response["warning"] = (
-            f"result has {len(rows)} rows, above the recommended "
-            f"{RECOMMENDED_QUERY_ROW_CEILING}. Consider aggregating in SQL "
-            "(GROUP BY, HAVING, LIMIT) — large results inflate LLM context."
+            f"result is ~{response_bytes // 4000}k tokens "
+            f"({response_bytes // 1000} KB), above the "
+            f"{RECOMMENDED_QUERY_BYTES // 1000} KB soft threshold. "
+            "Reference context sizes: Sonnet/Haiku ~200k tokens, "
+            "Opus ~1M. Consider aggregating in SQL (GROUP BY, HAVING, LIMIT) "
+            "to keep the response lean."
         )
     return response
 
