@@ -20,7 +20,10 @@ Safety model (Phase 1):
 3. ``describe_qvd``/``sample_qvd`` take a ``view_name`` that must match
    an entry in state; raw filesystem paths never cross the tool boundary.
 4. ``run_sql`` results are capped at ``max_query_rows`` (default 1000,
-   ceiling 10000) and a per-query timeout.
+   hard ceiling 30000) and a per-query timeout. Results exceeding
+   ``RECOMMENDED_QUERY_ROW_CEILING`` (10000) get a ``warning`` field in
+   the response so the LLM is nudged toward aggregation rather than
+   bulk row exfiltration.
 
 The threat model is "curious LLM, not malicious adversary." A determined
 attacker with shell access to the same machine already has everything the
@@ -42,7 +45,11 @@ import duckdb
 from mcp.server.fastmcp import FastMCP
 
 from qvd_mcp import state as state_module
-from qvd_mcp.config import MAX_QUERY_ROW_CEILING, Config
+from qvd_mcp.config import (
+    MAX_QUERY_ROW_CEILING,
+    RECOMMENDED_QUERY_ROW_CEILING,
+    Config,
+)
 from qvd_mcp.convert import discover_qvds, run_once
 
 log = logging.getLogger(__name__)
@@ -339,9 +346,11 @@ sample_qvd = _with_auto_refresh(sample_qvd)
 def run_sql(sql: str, max_rows: int = 1000) -> dict[str, Any]:
     """Execute read-only SQL against the loaded views.
 
-    ``max_rows`` defaults to 1000, hard-capped at 10000. Results beyond the
-    cap are truncated and ``truncated=True`` is set. Queries touching
-    filesystem-reading functions are rejected.
+    ``max_rows`` defaults to 1000, hard-capped at 30000. Results beyond the
+    cap are truncated and ``truncated=True`` is set. Results exceeding the
+    recommended 10000-row threshold carry a ``warning`` field suggesting
+    aggregation — large result sets inflate the LLM's context window.
+    Queries touching filesystem-reading functions are rejected.
     """
     ctx = _get_ctx()
     if _is_rejected(sql):
@@ -377,12 +386,19 @@ def run_sql(sql: str, max_rows: int = 1000) -> dict[str, Any]:
         timer.cancel()
     # Columnar rows (see ``sample_qvd``); ``sql`` is not echoed back since
     # the caller already has it in the turn that sent this request.
-    return {
+    response: dict[str, Any] = {
         "columns": cols,
         "rows": [list(r) for r in rows],
         "row_count": len(rows),
         "truncated": truncated,
     }
+    if len(rows) > RECOMMENDED_QUERY_ROW_CEILING:
+        response["warning"] = (
+            f"result has {len(rows)} rows, above the recommended "
+            f"{RECOMMENDED_QUERY_ROW_CEILING}. Consider aggregating in SQL "
+            "(GROUP BY, HAVING, LIMIT) — large results inflate LLM context."
+        )
+    return response
 
 
 run_sql = _with_auto_refresh(run_sql)
