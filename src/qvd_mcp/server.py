@@ -219,11 +219,16 @@ def _refresh_if_stale(ctx: ServerContext) -> None:
 
 
 def _with_auto_refresh(fn: Callable[P, R]) -> Callable[P, R]:
-    """Decorate a tool function so it probes for stale source QVDs first."""
+    """Decorate a tool function so it probes for stale source QVDs first.
+
+    No-op when ``source_dir`` is unset — nothing to probe.
+    """
 
     @functools.wraps(fn)
     def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
-        _refresh_if_stale(_get_ctx())
+        ctx = _get_ctx()
+        if ctx.config.source_dir is not None:
+            _refresh_if_stale(ctx)
         return fn(*args, **kwargs)
 
     return wrapped
@@ -237,8 +242,10 @@ def _with_auto_refresh(fn: Callable[P, R]) -> Callable[P, R]:
 def list_qvds() -> list[dict[str, Any]]:
     """List all QVDs currently loaded.
 
-    Returns one entry per view with its name, source path, row/column counts,
-    and last-converted timestamp.
+    Returns one entry per view with its name, source path (when still
+    present on disk), row/column counts. A source path that no longer
+    exists (e.g. the cache was shared from another machine) is omitted
+    rather than surfaced as a meaningless producer-local path.
     """
     ctx = _get_ctx()
     out: list[dict[str, Any]] = []
@@ -246,14 +253,20 @@ def list_qvds() -> list[dict[str, Any]]:
         # ``converted_at`` is deliberately omitted here — lazy auto-refresh
         # makes freshness a non-question, and skipping it shrinks the
         # always-visible inventory. Fetch from ``describe_qvd`` when needed.
-        out.append(
-            {
-                "view_name": entry.view_name,
-                "source_path": src,
-                "rows": _count(ctx, entry.view_name),
-                "columns": entry.columns,
-            }
-        )
+        row: dict[str, Any] = {
+            "view_name": entry.view_name,
+            "rows": _count(ctx, entry.view_name),
+            "columns": entry.columns,
+        }
+        if src:
+            try:
+                if Path(src).exists():
+                    row["source_path"] = src
+            except OSError:
+                # Guard against edge-case paths on network drives that raise
+                # on ``stat()`` — treat them as "gone" rather than crashing.
+                pass
+        out.append(row)
     return out
 
 
@@ -436,12 +449,19 @@ def serve(config: Config) -> None:
     current_state = state_module.load(config.cache_dir)
     conn = _build_connection(config, current_state)
     set_context(ServerContext(config=config, conn=conn, state=current_state))
-    log.info(
-        "qvd-mcp serving %d views from %s (source: %s)",
-        len(current_state.entries),
-        config.cache_dir,
-        config.source_dir,
-    )
+    if config.source_dir is not None:
+        log.info(
+            "qvd-mcp serving %d views from %s (source: %s)",
+            len(current_state.entries),
+            config.cache_dir,
+            config.source_dir,
+        )
+    else:
+        log.info(
+            "qvd-mcp serving %d views from %s (cache-only, no source)",
+            len(current_state.entries),
+            config.cache_dir,
+        )
     # ``mcp.server.fastmcp`` doesn't print a banner and doesn't phone home,
     # so there's nothing to silence here.
     app.run(transport="stdio")

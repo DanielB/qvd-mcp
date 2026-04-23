@@ -5,6 +5,9 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import duckdb
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from pyqvd import DoubleValue, IntegerValue, QvdTable
 
@@ -12,6 +15,7 @@ from qvd_mcp import server as server_module
 from qvd_mcp import state as state_module
 from qvd_mcp.config import Config
 from qvd_mcp.convert import run_once
+from qvd_mcp.state import State, StateEntry
 from tests.fixtures.generate import generate_all
 
 
@@ -237,3 +241,105 @@ def test_auto_refresh_disabled_when_debounce_zero(
 
     server_module.list_qvds()
     assert loaded_ctx.state.entries[src_key].source_mtime_ns == original_mtime
+
+
+# ---- Cache-only (no source_dir) tests -------------------------------------
+
+
+def _config_no_source(cache: Path) -> Config:
+    return Config(cache_dir=cache, source_dir=None)
+
+
+def test_auto_refresh_skipped_when_source_dir_is_none(tmp_path: Path) -> None:
+    """Without source_dir, _with_auto_refresh must not stat or prune."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    cfg = _config_no_source(cache)
+    conn = duckdb.connect(":memory:")
+    ctx = server_module.ServerContext(config=cfg, conn=conn, state=State())
+    server_module.set_context(ctx)
+    try:
+        # list_qvds is wrapped with _with_auto_refresh. In live mode with no
+        # state it would still run the probe; we want a clean no-op here.
+        assert server_module.list_qvds() == []
+    finally:
+        server_module.set_context(None)
+
+
+def test_list_qvds_omits_source_path_when_path_gone(tmp_path: Path) -> None:
+    """Producer's state.json entries reference paths that don't exist on the
+    consumer's disk; output should drop source_path rather than surface
+    meaningless producer-local paths."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    pq.write_table(pa.table({"x": [1, 2]}), str(cache / "sales.parquet"))
+
+    cfg = _config_no_source(cache)
+    conn = duckdb.connect(":memory:")
+    state = State(
+        entries={
+            "/Users/producer/data/sales.qvd": StateEntry(
+                view_name="sales",
+                parquet_path="sales.parquet",
+                source_mtime_ns=0,
+                source_size=0,
+                converted_at=state_module.now_iso(),
+                rows=2,
+                columns=1,
+            )
+        }
+    )
+    conn.execute(
+        f'CREATE OR REPLACE VIEW "sales" '
+        f"AS SELECT * FROM read_parquet('{cache / 'sales.parquet'}')"
+    )
+    ctx = server_module.ServerContext(config=cfg, conn=conn, state=state)
+    server_module.set_context(ctx)
+    try:
+        listing = server_module.list_qvds()
+        assert len(listing) == 1
+        assert "source_path" not in listing[0]
+        assert listing[0]["view_name"] == "sales"
+    finally:
+        server_module.set_context(None)
+
+
+def test_list_qvds_keeps_source_path_when_path_exists(tmp_path: Path) -> None:
+    """Live producer workflow: source QVD exists on disk, surface its path."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    pq.write_table(pa.table({"x": [1]}), str(cache / "live.parquet"))
+    source_qvd = tmp_path / "live.qvd"
+    source_qvd.write_bytes(b"fake-qvd")  # just needs to exist as a file
+
+    cfg = Config(cache_dir=cache, source_dir=tmp_path)
+    conn = duckdb.connect(":memory:")
+    state = State(
+        entries={
+            str(source_qvd): StateEntry(
+                view_name="live",
+                parquet_path="live.parquet",
+                source_mtime_ns=0,
+                source_size=0,
+                converted_at=state_module.now_iso(),
+                rows=1,
+                columns=1,
+            )
+        }
+    )
+    conn.execute(
+        f'CREATE OR REPLACE VIEW "live" '
+        f"AS SELECT * FROM read_parquet('{cache / 'live.parquet'}')"
+    )
+    ctx = server_module.ServerContext(config=cfg, conn=conn, state=state)
+    server_module.set_context(ctx)
+    # Force the auto-refresh debounce to skip; otherwise the probe would see
+    # the bogus ``source_mtime_ns=0`` and try to run a conversion pass on the
+    # fake QVD, which would fail. Other tests in this module twiddle
+    # ``_last_check`` the same way.
+    server_module._last_check = time.monotonic()
+    try:
+        listing = server_module.list_qvds()
+        assert listing[0]["source_path"] == str(source_qvd)
+    finally:
+        server_module.set_context(None)

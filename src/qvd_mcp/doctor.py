@@ -38,7 +38,7 @@ from qvd_mcp.config import load as load_config
 
 log = logging.getLogger(__name__)
 
-Status = Literal["pass", "warn", "fail"]
+Status = Literal["pass", "warn", "fail", "info"]
 
 # Stable check names. Load-bearing: ``exit_code`` uses CONFIG_CHECK_NAME to
 # decide between exit 1 and exit 2, so renaming either side independently
@@ -136,9 +136,21 @@ def _skipped(name: str) -> CheckResult:
 
 
 def check_source_dir_readable(config: Config | None) -> CheckResult:
-    """Confirm ``config.source_dir`` is an existing, readable directory."""
+    """Confirm ``config.source_dir`` is an existing, readable directory.
+
+    Cache-only mode (``config.source_dir is None``) is a valid first-class
+    configuration, not a misconfiguration — the colleague-with-shared-cache
+    workflow. Report ``info`` rather than ``warn`` or ``fail`` so the row
+    scans as green-adjacent instead of yellow.
+    """
     if config is None:
         return _skipped(SOURCE_CHECK_NAME)
+    if config.source_dir is None:
+        return CheckResult(
+            SOURCE_CHECK_NAME,
+            "info",
+            "N/A (cache-only, no source_dir configured)",
+        )
     path = config.source_dir
     if not path.is_dir():
         return CheckResult(
@@ -368,11 +380,13 @@ _STATUS_STYLES: dict[Status, str] = {
     "pass": "green",
     "warn": "yellow",
     "fail": "red",
+    "info": "cyan",
 }
 _STATUS_EMOJI: dict[Status, str] = {
     "pass": "\u2705",  # white heavy check mark
     "warn": "\u26a0\ufe0f",  # warning sign
     "fail": "\u274c",  # cross mark
+    "info": "\u2139\ufe0f",  # information source
 }
 
 

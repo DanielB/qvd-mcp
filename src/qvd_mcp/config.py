@@ -1,15 +1,21 @@
 """Configuration loading for qvd-mcp.
 
-Minimal TOML-backed config. A missing file is fine; all fields have defaults
-except ``source_dir``, which the user must set either in the file or via CLI.
+Minimal TOML-backed config. A missing file is fine; ``source_dir`` is
+optional — when unset, the server runs in cache-only mode (no auto-refresh,
+no conversion). A file-configured ``source_dir`` that doesn't exist on
+disk silently degrades to cache-only with a warning, which covers the
+case of a colleague copying the producer's ``config.toml``.
 """
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import platformdirs
+
+log = logging.getLogger(__name__)
 
 APP_NAME = "qvd-mcp"
 DEFAULT_MAX_QUERY_ROWS = 1000
@@ -38,8 +44,8 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class Config:
-    source_dir: Path
     cache_dir: Path
+    source_dir: Path | None = None
     max_query_rows: int = DEFAULT_MAX_QUERY_ROWS
     query_timeout_s: int = DEFAULT_QUERY_TIMEOUT_S
     log_level: str = "INFO"
@@ -96,7 +102,18 @@ def load(
 ) -> Config:
     """Load config, applying CLI overrides on top of file values and defaults.
 
-    A missing config file is allowed — only a missing ``source_dir`` is fatal.
+    ``source_dir`` is optional. When it is set in the file but the path does
+    not exist on disk, we log a warning and degrade to cache-only mode —
+    this handles the realistic case of a colleague copying the producer's
+    config.toml, where the embedded source path won't exist on their machine.
+    An explicit ``source_override`` (CLI ``--source``) that is missing is
+    still a hard error, because the user asked for it by name.
+
+    ``reader`` used to be a config option pointing at a backend (pyqvd vs
+    a planned qvd-rs). We only ship one backend and the Rust alternative
+    isn't currently viable (stale upstream, no Python 3.13 / arm64 wheels),
+    so the dispatch layer was removed. A ``reader`` key in existing
+    configs is silently ignored.
     """
     path = config_path or default_config_path()
     raw: dict[str, object] = {}
@@ -106,15 +123,25 @@ def load(
         except tomllib.TOMLDecodeError as exc:
             raise ConfigError(f"config file at {path} is not valid TOML: {exc}") from exc
 
-    source_value: str | Path | None = source_override or _coerce_str(raw, "source_dir")
-    if source_value is None:
-        raise ConfigError(
-            "source_dir is not set. Pass --source or add source_dir to "
-            f"{path}. See examples/config.example.toml."
-        )
-    source_dir = Path(str(source_value)).expanduser().resolve()
-    if not source_dir.is_dir():
-        raise ConfigError(f"source_dir does not exist or is not a directory: {source_dir}")
+    source_dir: Path | None = None
+    if source_override is not None:
+        source_dir = Path(source_override).expanduser().resolve()
+        if not source_dir.is_dir():
+            raise ConfigError(
+                f"source_dir does not exist or is not a directory: {source_dir}"
+            )
+    else:
+        source_value = _coerce_str(raw, "source_dir")
+        if source_value is not None:
+            candidate = Path(str(source_value)).expanduser().resolve()
+            if candidate.is_dir():
+                source_dir = candidate
+            else:
+                log.warning(
+                    "source_dir %s does not exist; running cache-only. "
+                    "Re-run `qvd-mcp setup` to reconfigure.",
+                    candidate,
+                )
 
     cache_value: str | Path | None = cache_override or _coerce_str(raw, "cache_dir")
     cache_dir = (
@@ -122,12 +149,6 @@ def load(
         if cache_value is not None
         else default_cache_dir()
     )
-
-    # ``reader`` used to be a config option pointing at a backend (pyqvd vs
-    # a planned qvd-rs). We only ship one backend and the Rust alternative
-    # isn't currently viable (stale upstream, no Python 3.13 / arm64 wheels),
-    # so the dispatch layer was removed. A ``reader`` key in existing
-    # configs is silently ignored.
 
     max_rows = _coerce_int(raw, "max_query_rows", DEFAULT_MAX_QUERY_ROWS)
     max_rows = max(1, min(max_rows, MAX_QUERY_ROW_CEILING))
@@ -152,8 +173,8 @@ def load(
     )
 
     return Config(
-        source_dir=source_dir,
         cache_dir=cache_dir,
+        source_dir=source_dir,
         max_query_rows=max_rows,
         query_timeout_s=timeout,
         log_level=log_level,
