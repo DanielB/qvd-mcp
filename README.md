@@ -334,16 +334,18 @@ run_sql(sql: str, max_rows: int = 1000) -> dict
 ```
 
 Execute arbitrary read-only SQL across the registered views. `max_rows`
-defaults to 1000 and is hard-capped at 30 000; anything beyond the cap
-is truncated and `truncated: true` is returned. Responses whose
-JSON-serialized size exceeds the recommended **500 KB** (≈125 k tokens)
-carry an extra `warning` field pointing at aggregation — the byte
-measure is honest about what the user will feel in their LLM context,
-so 20 000 rows of narrow numeric data stays silent while 1 000 rows of
-long text columns will warn. SQL that touches filesystem-reading
-functions or DDL statements is rejected with a `Rejected` error — see
-[SECURITY.md](SECURITY.md) for the list. Per-query timeout defaults to
-30 seconds and cancels the query via `conn.interrupt()`.
+defaults to 1000 and is an upper bound on rows returned; the server
+additionally caps total response size at **2 MB** (~500 k tokens) by
+streaming rows from DuckDB and stopping once the serialized response
+would overflow. Either stop condition sets `truncated: true`. Responses
+whose JSON size exceeds the recommended **500 KB** (~125 k tokens) also
+carry a `warning` field — the byte measure is honest about what the
+user feels in their LLM context, so 50 000 rows of narrow numeric data
+stays silent while 1 000 rows of long text columns will warn. There is
+no row ceiling; row count follows bytes. SQL that touches filesystem-
+reading functions or DDL statements is rejected with a `Rejected`
+error — see [SECURITY.md](SECURITY.md) for the list. Per-query timeout
+defaults to 30 seconds and cancels the query via `conn.interrupt()`.
 
 Example invocation:
 
@@ -439,7 +441,7 @@ commented skeleton.
 | --- | --- | --- |
 | `source_dir` | *(optional — unset means cache-only)* | Directory of QVDs to scan recursively. |
 | `cache_dir` | platformdirs user cache | Where the Parquet cache and state sidecar live. |
-| `max_query_rows` | `1000` | Default `run_sql` row cap. Hard ceiling is 30 000; results above 10 000 carry a `warning` field. |
+| `max_query_rows` | `1000` | Default upper bound on rows for `run_sql`. Responses are additionally capped at 2 MB; results above 500 KB carry a `warning` field. |
 | `query_timeout_s` | `30` | Per-query timeout; `conn.interrupt()` fires when it expires. |
 | `log_level` | `"INFO"` | `DEBUG` / `INFO` / `WARNING` / `ERROR`. |
 | `auto_refresh_debounce_s` | `10` | Seconds between lazy-refresh probes. `0` disables the probe. |

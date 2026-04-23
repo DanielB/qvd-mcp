@@ -19,14 +19,15 @@ Safety model (Phase 1):
    user-supplied SQL.
 3. ``describe_qvd``/``sample_qvd`` take a ``view_name`` that must match
    an entry in state; raw filesystem paths never cross the tool boundary.
-4. ``run_sql`` results are capped at ``max_query_rows`` (default 1000,
-   hard ceiling 30000) and a per-query timeout. Responses whose
-   JSON-serialized size exceeds ``RECOMMENDED_QUERY_BYTES`` (500 KB)
-   get a ``warning`` field nudging toward aggregation. Measuring the
-   actual response size — rather than a row-count proxy — gives users
-   an honest signal: a narrow numeric query of 20000 rows is cheap and
-   won't warn, while 1000 rows of long text columns can easily cross
-   the threshold and will.
+4. ``run_sql`` caps total response size at ``MAX_QUERY_BYTES`` (2 MB,
+   ~500k tokens) and duration at the configured per-query timeout.
+   There is no row ceiling — the server streams rows up to ``max_rows``
+   or the byte cap, whichever is reached first. Responses above
+   ``RECOMMENDED_QUERY_BYTES`` (500 KB, ~125k tokens) carry a
+   ``warning`` field nudging toward aggregation. Byte-based enforcement
+   gives users an honest signal: a narrow numeric query of 20000 rows
+   serializes to a few hundred KB and won't warn, while 1000 rows of
+   long text columns can easily cross the threshold and will.
 
 The threat model is "curious LLM, not malicious adversary." A determined
 attacker with shell access to the same machine already has everything the
@@ -50,7 +51,7 @@ from mcp.server.fastmcp import FastMCP
 
 from qvd_mcp import state as state_module
 from qvd_mcp.config import (
-    MAX_QUERY_ROW_CEILING,
+    MAX_QUERY_BYTES,
     RECOMMENDED_QUERY_BYTES,
     Config,
 )
@@ -347,16 +348,36 @@ def sample_qvd(view_name: str, n: int = 10) -> dict[str, Any]:
 sample_qvd = _with_auto_refresh(sample_qvd)
 
 
+_FETCH_BATCH_SIZE = 256
+"""Rows per fetchmany() while streaming under the byte budget.
+
+Small enough to bound overshoot when a batch would cross the cap, large
+enough that DuckDB's per-call overhead stays negligible for typical
+queries. Changing this doesn't affect semantics, only overshoot slack.
+"""
+
+_WARNING_RESERVE_BYTES = 500
+"""Budget held back to fit the optional ``warning`` field.
+
+The warning is only added when the response already exceeds
+``RECOMMENDED_QUERY_BYTES``, which is always true when the hard cap is
+hit. Reserving up front keeps the final response strictly under
+``MAX_QUERY_BYTES`` instead of overshooting by the size of the warning.
+"""
+
+
 def run_sql(sql: str, max_rows: int = 1000) -> dict[str, Any]:
     """Execute read-only SQL against the loaded views.
 
-    ``max_rows`` defaults to 1000, hard-capped at 30000. Results beyond the
-    cap are truncated and ``truncated=True`` is set. Responses whose
-    JSON-serialized size exceeds the recommended 500 KB threshold carry a
-    ``warning`` field suggesting aggregation — the byte measure is honest
-    about what the user will feel in their context window, independent of
-    row count and column width. Queries touching filesystem-reading
-    functions are rejected.
+    ``max_rows`` is an upper bound on rows returned — the server streams
+    up to that many rows from DuckDB but will stop early once the
+    serialized response would exceed ``MAX_QUERY_BYTES`` (2 MB). Either
+    stop condition sets ``truncated=True``. Responses exceeding
+    ``RECOMMENDED_QUERY_BYTES`` (500 KB) carry a ``warning`` field
+    suggesting aggregation. The byte cap is the honest measure of what
+    the user feels in their context window, independent of row count and
+    column width. Queries touching filesystem-reading functions are
+    rejected.
     """
     ctx = _get_ctx()
     if _is_rejected(sql):
@@ -370,15 +391,51 @@ def run_sql(sql: str, max_rows: int = 1000) -> dict[str, Any]:
                 ),
             }
         }
-    limit = max(1, min(int(max_rows), MAX_QUERY_ROW_CEILING))
+    row_budget = max(1, int(max_rows))
     timeout_s = ctx.config.query_timeout_s
     timer = threading.Timer(timeout_s, ctx.conn.interrupt)
     timer.start()
     try:
         rel = ctx.conn.execute(sql)
         cols = [d[0] for d in rel.description]
-        rows = rel.fetchmany(limit)
-        truncated = len(rows) == limit and rel.fetchone() is not None
+        # Fixed overhead: columns + scaffolding, before any rows.
+        overhead_bytes = len(
+            json.dumps(
+                {"columns": cols, "rows": [], "row_count": 0, "truncated": False},
+                default=str,
+            )
+        )
+        byte_budget = max(0, MAX_QUERY_BYTES - overhead_bytes - _WARNING_RESERVE_BYTES)
+        rows: list[list[Any]] = []
+        running_row_bytes = 0
+        truncated = False
+        while len(rows) < row_budget:
+            remaining = row_budget - len(rows)
+            batch = rel.fetchmany(min(_FETCH_BATCH_SIZE, remaining))
+            if not batch:
+                break
+            batch_rows = [list(r) for r in batch]
+            batch_bytes = len(json.dumps(batch_rows, default=str))
+            if running_row_bytes + batch_bytes <= byte_budget:
+                rows.extend(batch_rows)
+                running_row_bytes += batch_bytes
+                continue
+            # This batch would overflow. Fit as many individual rows as
+            # possible before stopping. Per-row serialization is slow but
+            # only happens once per query, in the final partial batch.
+            for row in batch_rows:
+                row_bytes = len(json.dumps(row, default=str)) + 2  # delim
+                if running_row_bytes + row_bytes > byte_budget:
+                    truncated = True
+                    break
+                rows.append(row)
+                running_row_bytes += row_bytes
+            if truncated:
+                break
+        # Row-budget truncation: if we filled the requested count, check
+        # whether the query actually had more to give.
+        if not truncated and len(rows) == row_budget and rel.fetchone() is not None:
+            truncated = True
     except duckdb.InterruptException:
         return {
             "error": {
@@ -394,14 +451,10 @@ def run_sql(sql: str, max_rows: int = 1000) -> dict[str, Any]:
     # the caller already has it in the turn that sent this request.
     response: dict[str, Any] = {
         "columns": cols,
-        "rows": [list(r) for r in rows],
+        "rows": rows,
         "row_count": len(rows),
         "truncated": truncated,
     }
-    # Byte-count warning: measure the actual JSON the caller will receive
-    # so the threshold tracks what the user feels in their context window,
-    # not a row-count proxy. ``default=str`` mirrors how pydantic would
-    # serialize non-JSON-native types (datetime, Decimal) downstream.
     response_bytes = len(json.dumps(response, default=str))
     if response_bytes > RECOMMENDED_QUERY_BYTES:
         # Decimal KB (bytes // 1000) so the displayed threshold matches the
