@@ -445,21 +445,46 @@ def test_run_sql_text_heavy_result_warns_at_low_row_count(tmp_path: Path) -> Non
     assert "1M" in result["warning"]    # Opus context reference
 
 
-def test_run_sql_max_rows_clamped_to_new_ceiling(tmp_path: Path) -> None:
-    """Requesting max_rows above the 30_000 ceiling must clamp down to it.
-
-    Use a narrow schema so this test focuses on the clamp itself, not on
-    whether the byte warning fires (which depends on schema width).
-    """
-    table = pa.table({"n": list(range(40_000))})
+def test_run_sql_returns_all_rows_when_under_byte_budget(tmp_path: Path) -> None:
+    """With no row cap, a 50 000-row narrow-integer query serialises to
+    ~650 KB and comes back in full — well under the 2 MB hard cap."""
+    table = pa.table({"n": list(range(50_000))})
     ctx = _ctx_with_view(tmp_path, table)
     server_module.set_context(ctx)
     try:
         result = server_module.run_sql("SELECT * FROM big", max_rows=100_000)
     finally:
         server_module.set_context(None)
-    assert result["row_count"] == 30_000
+    assert result["row_count"] == 50_000
+    assert result["truncated"] is False
+
+
+def test_run_sql_byte_cap_truncates_oversized_result(tmp_path: Path) -> None:
+    """A query whose response would exceed the 2 MB hard cap is truncated
+    via the streaming byte budget. ``truncated=True`` and ``row_count``
+    is the number of rows that actually fit — no row ceiling involved."""
+    # 10 000 rows × 500-byte text column = ~5 MB raw, well over the 2 MB cap.
+    long_str = "x" * 500
+    table = pa.table(
+        {
+            "id": list(range(10_000)),
+            "body": [long_str] * 10_000,
+        }
+    )
+    ctx = _ctx_with_view(tmp_path, table)
+    server_module.set_context(ctx)
+    try:
+        result = server_module.run_sql("SELECT * FROM big", max_rows=20_000)
+    finally:
+        server_module.set_context(None)
     assert result["truncated"] is True
+    assert result["row_count"] < 10_000, "byte budget should have cut this short"
+    # Measure the actual returned response to confirm we did not exceed 2 MB.
+    import json as _json
+    payload = _json.dumps(result, default=str)
+    assert len(payload) <= 2_000_000, "response exceeded MAX_QUERY_BYTES hard cap"
+    # And it should carry a warning (well above 500 KB).
+    assert "warning" in result
 
 
 def test_run_sql_user_max_rows_below_threshold_wins(tmp_path: Path) -> None:

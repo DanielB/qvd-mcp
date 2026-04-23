@@ -19,15 +19,20 @@ log = logging.getLogger(__name__)
 
 APP_NAME = "qvd-mcp"
 DEFAULT_MAX_QUERY_ROWS = 1000
-MAX_QUERY_ROW_CEILING = 30_000
-RECOMMENDED_QUERY_BYTES = 500_000
-"""Soft threshold for ``run_sql`` response size (JSON bytes, ~125k tokens).
+MAX_QUERY_BYTES = 2_000_000
+"""Hard cap on ``run_sql`` response size (JSON bytes, ~500k tokens).
 
-Chosen as the honest measure of user-visible cost: a 30 000-row query on
-three narrow numeric columns serializes to ~900 KB and warrants a warning;
-the same 30 000-row query on tiny 2-column integer data comes in well
-under 500 KB and doesn't. Row count alone would over-warn on the second
-case and under-warn on text-heavy schemas. See ``server.run_sql``.
+Row count is not capped directly; ``run_sql`` streams results and stops
+once the serialized response would exceed this many bytes. Keeps the
+contract honest: what the user feels in their context window is bytes,
+and bytes is what we enforce.
+"""
+RECOMMENDED_QUERY_BYTES = 500_000
+"""Soft threshold for ``run_sql`` response size (~125k tokens).
+
+Responses above this carry a ``warning`` field. Chosen so narrow numeric
+queries of 20 000+ rows stay silent while text-heavy queries of only a
+thousand rows correctly trigger the nudge toward aggregation.
 """
 DEFAULT_QUERY_TIMEOUT_S = 30
 DEFAULT_AUTO_REFRESH_DEBOUNCE_S = 10
@@ -160,7 +165,7 @@ def load(
     )
 
     max_rows = _coerce_int(raw, "max_query_rows", DEFAULT_MAX_QUERY_ROWS)
-    max_rows = max(1, min(max_rows, MAX_QUERY_ROW_CEILING))
+    max_rows = max(1, max_rows)
 
     timeout = _coerce_int(raw, "query_timeout_s", DEFAULT_QUERY_TIMEOUT_S)
     timeout = max(1, timeout)

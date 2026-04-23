@@ -65,13 +65,13 @@ def test_load_with_cli_source_override_validates(tmp_path: Path) -> None:
         load(cfg_file, source_override=tmp_path / "not-here")
 
 
-# ---- max_query_rows clamping ----------------------------------------------
+# ---- max_query_rows and byte thresholds -----------------------------------
 
 
-def test_max_query_rows_above_ceiling_is_clamped(tmp_path: Path) -> None:
-    """max_query_rows in the config is clamped to MAX_QUERY_ROW_CEILING."""
-    from qvd_mcp.config import MAX_QUERY_ROW_CEILING
-
+def test_max_query_rows_is_not_clamped(tmp_path: Path) -> None:
+    """The hard cap is bytes (enforced in run_sql), not rows. A large
+    max_query_rows value is passed through as-is; the byte budget will
+    stop the fetch before pathological row counts are realised."""
     cache = tmp_path / "cache"
     cache.mkdir()
     cfg_file = _write(
@@ -79,23 +79,24 @@ def test_max_query_rows_above_ceiling_is_clamped(tmp_path: Path) -> None:
         f"cache_dir = '{cache}'\nmax_query_rows = 100000\n",
     )
     cfg = load(cfg_file)
-    assert cfg.max_query_rows == MAX_QUERY_ROW_CEILING
+    assert cfg.max_query_rows == 100000
 
 
-def test_max_query_rows_within_ceiling_is_preserved(tmp_path: Path) -> None:
+def test_max_query_rows_floor_is_one(tmp_path: Path) -> None:
     cache = tmp_path / "cache"
     cache.mkdir()
     cfg_file = _write(
         tmp_path / "config.toml",
-        f"cache_dir = '{cache}'\nmax_query_rows = 20000\n",
+        f"cache_dir = '{cache}'\nmax_query_rows = 0\n",
     )
     cfg = load(cfg_file)
-    assert cfg.max_query_rows == 20000
+    assert cfg.max_query_rows == 1
 
 
-def test_query_thresholds_lock() -> None:
-    """Lock the constants in place so they can't drift silently."""
-    from qvd_mcp.config import MAX_QUERY_ROW_CEILING, RECOMMENDED_QUERY_BYTES
+def test_byte_thresholds_lock() -> None:
+    """Lock the byte-based constants so they can't drift silently."""
+    from qvd_mcp.config import MAX_QUERY_BYTES, RECOMMENDED_QUERY_BYTES
 
-    assert MAX_QUERY_ROW_CEILING == 30_000
+    assert MAX_QUERY_BYTES == 2_000_000
     assert RECOMMENDED_QUERY_BYTES == 500_000
+    assert RECOMMENDED_QUERY_BYTES < MAX_QUERY_BYTES

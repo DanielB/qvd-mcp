@@ -14,8 +14,9 @@ source_dir = "/Users/you/Documents/QVDs"
 # from platformdirs (e.g. ~/Library/Caches/qvd-mcp on macOS).
 # cache_dir = "/Users/you/.cache/qvd-mcp"
 
-# Optional. Default row cap for the `run_sql` MCP tool. Hard ceiling is 30000;
-# results above the recommended 10000 also carry a `warning` field.
+# Optional. Default upper bound on rows returned by the `run_sql` MCP tool.
+# The server additionally caps response size at 2 MB; results above 500 KB
+# (~125k tokens) carry a `warning` field. No hard row ceiling.
 # max_query_rows = 1000
 
 # Optional. Per-query timeout in seconds.
