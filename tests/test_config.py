@@ -63,3 +63,40 @@ def test_load_with_cli_source_override_validates(tmp_path: Path) -> None:
     cfg_file = _write(tmp_path / "config.toml", f"cache_dir = '{cache}'\n")
     with pytest.raises(ConfigError, match="does not exist"):
         load(cfg_file, source_override=tmp_path / "not-here")
+
+
+# ---- max_query_rows clamping ----------------------------------------------
+
+
+def test_max_query_rows_above_ceiling_is_clamped(tmp_path: Path) -> None:
+    """max_query_rows in the config is clamped to MAX_QUERY_ROW_CEILING."""
+    from qvd_mcp.config import MAX_QUERY_ROW_CEILING
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    cfg_file = _write(
+        tmp_path / "config.toml",
+        f"cache_dir = '{cache}'\nmax_query_rows = 100000\n",
+    )
+    cfg = load(cfg_file)
+    assert cfg.max_query_rows == MAX_QUERY_ROW_CEILING
+
+
+def test_max_query_rows_within_ceiling_is_preserved(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    cfg_file = _write(
+        tmp_path / "config.toml",
+        f"cache_dir = '{cache}'\nmax_query_rows = 20000\n",
+    )
+    cfg = load(cfg_file)
+    assert cfg.max_query_rows == 20000
+
+
+def test_ceiling_is_thirty_thousand() -> None:
+    """Lock the ceiling in place so it can't drift silently."""
+    from qvd_mcp.config import MAX_QUERY_ROW_CEILING, RECOMMENDED_QUERY_ROW_CEILING
+
+    assert MAX_QUERY_ROW_CEILING == 30_000
+    assert RECOMMENDED_QUERY_ROW_CEILING == 10_000
+    assert RECOMMENDED_QUERY_ROW_CEILING < MAX_QUERY_ROW_CEILING

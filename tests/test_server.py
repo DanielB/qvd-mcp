@@ -343,3 +343,100 @@ def test_list_qvds_keeps_source_path_when_path_exists(tmp_path: Path) -> None:
         assert listing[0]["source_path"] == str(source_qvd)
     finally:
         server_module.set_context(None)
+
+
+# ---- run_sql row-limit and recommendation tests ---------------------------
+
+
+def _ctx_with_generated_view(tmp_path: Path, row_count: int) -> server_module.ServerContext:
+    """Build a server context whose DuckDB has a single view ``big`` with
+    ``row_count`` rows, backed by a parquet on disk. Used to exercise the
+    row-ceiling and warning logic without needing a real QVD conversion."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    parquet = cache / "big.parquet"
+    pq.write_table(pa.table({"n": list(range(row_count))}), str(parquet))
+    cfg = Config(cache_dir=cache, source_dir=None)
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        f'CREATE OR REPLACE VIEW "big" AS SELECT * FROM read_parquet(\'{parquet}\')'
+    )
+    state = State(
+        entries={
+            "cache://big.parquet": StateEntry(
+                view_name="big",
+                parquet_path="big.parquet",
+                source_mtime_ns=0,
+                source_size=0,
+                converted_at=state_module.now_iso(),
+                rows=row_count,
+                columns=1,
+            )
+        }
+    )
+    return server_module.ServerContext(config=cfg, conn=conn, state=state)
+
+
+def test_run_sql_small_result_has_no_warning(tmp_path: Path) -> None:
+    ctx = _ctx_with_generated_view(tmp_path, row_count=50)
+    server_module.set_context(ctx)
+    try:
+        result = server_module.run_sql("SELECT * FROM big", max_rows=10_000)
+    finally:
+        server_module.set_context(None)
+    assert result["row_count"] == 50
+    assert "warning" not in result
+    assert result["truncated"] is False
+
+
+def test_run_sql_at_recommended_threshold_has_no_warning(tmp_path: Path) -> None:
+    """Exactly 10_000 rows is the recommended threshold; only results
+    *exceeding* it get a warning."""
+    ctx = _ctx_with_generated_view(tmp_path, row_count=10_000)
+    server_module.set_context(ctx)
+    try:
+        result = server_module.run_sql("SELECT * FROM big", max_rows=10_000)
+    finally:
+        server_module.set_context(None)
+    assert result["row_count"] == 10_000
+    assert "warning" not in result
+
+
+def test_run_sql_above_recommended_threshold_emits_warning(tmp_path: Path) -> None:
+    ctx = _ctx_with_generated_view(tmp_path, row_count=15_000)
+    server_module.set_context(ctx)
+    try:
+        result = server_module.run_sql("SELECT * FROM big", max_rows=20_000)
+    finally:
+        server_module.set_context(None)
+    assert result["row_count"] == 15_000
+    assert "warning" in result
+    assert "15000" in result["warning"] or "15,000" in result["warning"]
+    assert "10000" in result["warning"] or "10,000" in result["warning"]
+
+
+def test_run_sql_max_rows_clamped_to_new_ceiling(tmp_path: Path) -> None:
+    """Requesting max_rows above the 30_000 ceiling must clamp down to it."""
+    ctx = _ctx_with_generated_view(tmp_path, row_count=40_000)
+    server_module.set_context(ctx)
+    try:
+        result = server_module.run_sql("SELECT * FROM big", max_rows=100_000)
+    finally:
+        server_module.set_context(None)
+    assert result["row_count"] == 30_000
+    assert result["truncated"] is True
+    assert "warning" in result  # 30_000 > 10_000
+
+
+def test_run_sql_user_max_rows_below_threshold_wins(tmp_path: Path) -> None:
+    """User asked for a small result; even if the view is huge, we return
+    what they asked for without a warning."""
+    ctx = _ctx_with_generated_view(tmp_path, row_count=50_000)
+    server_module.set_context(ctx)
+    try:
+        result = server_module.run_sql("SELECT * FROM big", max_rows=500)
+    finally:
+        server_module.set_context(None)
+    assert result["row_count"] == 500
+    assert result["truncated"] is True
+    assert "warning" not in result
