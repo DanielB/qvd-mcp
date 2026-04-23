@@ -61,8 +61,12 @@ def discover_qvds(config: Config) -> list[Path]:
     to ``source_dir`` — ``archive/*`` and ``*.backup.qvd`` both work.
 
     Returns a sorted list so name-allocation during conversion is stable.
+    Returns an empty list when ``source_dir`` is unset (cache-only mode):
+    there is nothing to discover, so ``run_once`` produces a zeroed report.
     """
     source_dir = config.source_dir
+    if source_dir is None:
+        return []
     matched: set[Path] = set()
     for pattern in config.include:
         for path in source_dir.rglob(pattern):

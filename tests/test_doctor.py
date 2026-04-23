@@ -84,14 +84,20 @@ def _patch_config_path(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
 
 
 def test_config_parses_missing_source_warns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # Point at a config file that doesn't exist at all → source_dir unset.
+    # After the cache-sharing change this is a valid first-class mode, not
+    # a misconfiguration — ``load()`` succeeds with ``source_dir=None`` and
+    # doctor reports ``pass``. A legitimately unset source should not emit
+    # the "does not exist" warning that a *misconfigured* source would.
     _patch_config_path(monkeypatch, tmp_path / "config.toml")
-    result, config = doctor.check_config_parses()
-    assert config is None
-    assert result.status == "warn"
-    assert "setup" in result.message
+    with caplog.at_level("WARNING", logger="qvd_mcp.config"):
+        result, config = doctor.check_config_parses()
+    assert result.status == "pass"
+    assert config is not None
+    assert config.source_dir is None
+    assert not any("does not exist" in rec.message.lower() for rec in caplog.records)
 
 
 def test_config_parses_malformed_toml_fails(
@@ -122,17 +128,24 @@ def test_config_parses_pass(
 
 
 def test_config_parses_bad_source_dir_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Non-"is not set" ConfigError: source_dir is set but doesn't exist.
+    # After the cache-sharing change, a file-configured ``source_dir`` that
+    # doesn't exist on disk degrades silently (producer's config.toml on a
+    # consumer's machine). ``load()`` returns a ``Config`` with
+    # ``source_dir=None`` and logs a warning rather than raising — so
+    # doctor reports ``pass``. We still want to see the warning in logs.
     cfg_path = _write_config_toml(
         tmp_path / "config.toml",
         'source_dir = "/nonexistent/path/that/really/does/not/exist"\n',
     )
     _patch_config_path(monkeypatch, cfg_path)
-    result, config = doctor.check_config_parses()
-    assert config is None
-    assert result.status == "fail"
+    with caplog.at_level("WARNING", logger="qvd_mcp.config"):
+        result, config = doctor.check_config_parses()
+    assert result.status == "pass"
+    assert config is not None
+    assert config.source_dir is None
+    assert any("does not exist" in rec.message.lower() for rec in caplog.records)
 
 
 # ---------------------------------------------------------------------------
