@@ -11,11 +11,13 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from qvd_mcp import claude_config, setup_wizard
 from qvd_mcp import config as qmcp_config
-from qvd_mcp.setup_wizard import SetupError, run_setup
+from qvd_mcp.setup_wizard import SetupChoices, SetupError, run_setup
 from tests.fixtures.generate import generate_all
 
 
@@ -267,3 +269,104 @@ def test_setup_yes_is_idempotent(
     parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
     assert "source_dir" in parsed
     assert "cache_dir" in parsed
+
+
+# ---- Cache-only setup tests -----------------------------------------------
+
+
+def _populate(cache: Path) -> None:
+    cache.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table({"x": [1]}), str(cache / "shared.parquet"))
+
+
+def test_yes_without_source_writes_cache_only_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    _populate(cache)
+    cfg_path = tmp_path / "config.toml"
+    monkeypatch.setattr("qvd_mcp.config.default_config_path", lambda: cfg_path)
+    monkeypatch.setattr(
+        "qvd_mcp.claude_config.default_config_path",
+        lambda: tmp_path / "claude.json",
+    )
+
+    run_setup(yes=True, cache=cache, no_claude=True)
+
+    body = cfg_path.read_text(encoding="utf-8")
+    assert "source_dir" not in body
+    assert f"cache_dir = '{cache}'" in body
+
+
+def test_yes_without_source_does_not_run_conversion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    _populate(cache)
+    cfg_path = tmp_path / "config.toml"
+    monkeypatch.setattr("qvd_mcp.config.default_config_path", lambda: cfg_path)
+    monkeypatch.setattr(
+        "qvd_mcp.claude_config.default_config_path",
+        lambda: tmp_path / "claude.json",
+    )
+
+    called: list[bool] = []
+
+    def _fail(*a: Any, **k: Any) -> Any:
+        called.append(True)
+        raise RuntimeError("run_once must not be called in cache-only setup")
+
+    monkeypatch.setattr("qvd_mcp.convert.run_once", _fail)
+    run_setup(yes=True, cache=cache, no_claude=True)
+    assert called == []
+
+
+def test_yes_without_source_and_empty_cache_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "empty"
+    cache.mkdir()
+    cfg_path = tmp_path / "config.toml"
+    monkeypatch.setattr("qvd_mcp.config.default_config_path", lambda: cfg_path)
+
+    with pytest.raises(SetupError, match="parquet"):
+        run_setup(yes=True, cache=cache, no_claude=True)
+    assert not cfg_path.exists()
+
+
+def test_yes_with_source_runs_conversion_today(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Existing producer path still works - regression guard."""
+    source = tmp_path / "qvds"
+    source.mkdir()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    cfg_path = tmp_path / "config.toml"
+    monkeypatch.setattr("qvd_mcp.config.default_config_path", lambda: cfg_path)
+    monkeypatch.setattr(
+        "qvd_mcp.claude_config.default_config_path",
+        lambda: tmp_path / "claude.json",
+    )
+
+    called: list[bool] = []
+
+    def _ok(cfg: Any) -> Any:
+        from qvd_mcp.convert import ConvertReport
+        called.append(True)
+        return ConvertReport()
+
+    monkeypatch.setattr("qvd_mcp.convert.run_once", _ok)
+    run_setup(yes=True, source=source, cache=cache, no_claude=True)
+    assert called == [True]
+    body = cfg_path.read_text(encoding="utf-8")
+    assert f"source_dir = '{source}'" in body
+
+
+def test_setup_choices_accepts_none_source() -> None:
+    choices = SetupChoices(
+        source_dir=None,
+        cache_dir=Path("/tmp/cache"),
+        patch_claude=True,
+    )
+    assert choices.source_dir is None
