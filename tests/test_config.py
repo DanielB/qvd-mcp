@@ -93,10 +93,9 @@ def test_max_query_rows_within_ceiling_is_preserved(tmp_path: Path) -> None:
     assert cfg.max_query_rows == 20000
 
 
-def test_ceiling_is_thirty_thousand() -> None:
-    """Lock the ceiling in place so it can't drift silently."""
-    from qvd_mcp.config import MAX_QUERY_ROW_CEILING, RECOMMENDED_QUERY_ROW_CEILING
+def test_query_thresholds_lock() -> None:
+    """Lock the constants in place so they can't drift silently."""
+    from qvd_mcp.config import MAX_QUERY_ROW_CEILING, RECOMMENDED_QUERY_BYTES
 
     assert MAX_QUERY_ROW_CEILING == 30_000
-    assert RECOMMENDED_QUERY_ROW_CEILING == 10_000
-    assert RECOMMENDED_QUERY_ROW_CEILING < MAX_QUERY_ROW_CEILING
+    assert RECOMMENDED_QUERY_BYTES == 500_000

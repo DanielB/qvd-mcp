@@ -345,32 +345,38 @@ def test_list_qvds_keeps_source_path_when_path_exists(tmp_path: Path) -> None:
         server_module.set_context(None)
 
 
-# ---- run_sql row-limit and recommendation tests ---------------------------
+# ---- run_sql byte-size and recommendation tests ---------------------------
 
 
-def _ctx_with_generated_view(tmp_path: Path, row_count: int) -> server_module.ServerContext:
-    """Build a server context whose DuckDB has a single view ``big`` with
-    ``row_count`` rows, backed by a parquet on disk. Used to exercise the
-    row-ceiling and warning logic without needing a real QVD conversion."""
+def _ctx_with_view(
+    tmp_path: Path, table: pa.Table, view_name: str = "big"
+) -> server_module.ServerContext:
+    """Build a server context backed by ``table`` materialised as a parquet.
+
+    Used to exercise run_sql under realistic data shapes — narrow numeric,
+    wide text, etc. — since the byte-based warning depends on actual
+    serialisation size, not row count alone.
+    """
     cache = tmp_path / "cache"
     cache.mkdir()
-    parquet = cache / "big.parquet"
-    pq.write_table(pa.table({"n": list(range(row_count))}), str(parquet))
+    parquet = cache / f"{view_name}.parquet"
+    pq.write_table(table, str(parquet))
     cfg = Config(cache_dir=cache, source_dir=None)
     conn = duckdb.connect(":memory:")
     conn.execute(
-        f'CREATE OR REPLACE VIEW "big" AS SELECT * FROM read_parquet(\'{parquet}\')'
+        f'CREATE OR REPLACE VIEW "{view_name}" '
+        f"AS SELECT * FROM read_parquet('{parquet}')"
     )
     state = State(
         entries={
-            "cache://big.parquet": StateEntry(
-                view_name="big",
-                parquet_path="big.parquet",
+            f"cache://{view_name}.parquet": StateEntry(
+                view_name=view_name,
+                parquet_path=f"{view_name}.parquet",
                 source_mtime_ns=0,
                 source_size=0,
                 converted_at=state_module.now_iso(),
-                rows=row_count,
-                columns=1,
+                rows=table.num_rows,
+                columns=table.num_columns,
             )
         }
     )
@@ -378,7 +384,8 @@ def _ctx_with_generated_view(tmp_path: Path, row_count: int) -> server_module.Se
 
 
 def test_run_sql_small_result_has_no_warning(tmp_path: Path) -> None:
-    ctx = _ctx_with_generated_view(tmp_path, row_count=50)
+    table = pa.table({"n": list(range(50))})
+    ctx = _ctx_with_view(tmp_path, table)
     server_module.set_context(ctx)
     try:
         result = server_module.run_sql("SELECT * FROM big", max_rows=10_000)
@@ -389,35 +396,63 @@ def test_run_sql_small_result_has_no_warning(tmp_path: Path) -> None:
     assert result["truncated"] is False
 
 
-def test_run_sql_at_recommended_threshold_has_no_warning(tmp_path: Path) -> None:
-    """Exactly 10_000 rows is the recommended threshold; only results
-    *exceeding* it get a warning."""
-    ctx = _ctx_with_generated_view(tmp_path, row_count=10_000)
+def test_run_sql_wide_narrow_data_20k_rows_no_warning(tmp_path: Path) -> None:
+    """User's honest case: 20 000 rows × 2 narrow integer columns is cheap.
+
+    The row-based threshold this replaces would have warned here needlessly;
+    the byte measure correctly stays silent because the actual payload is
+    well under 500 KB.
+    """
+    rows = 20_000
+    table = pa.table({"id": list(range(rows)), "n": list(range(rows))})
+    ctx = _ctx_with_view(tmp_path, table)
     server_module.set_context(ctx)
     try:
-        result = server_module.run_sql("SELECT * FROM big", max_rows=10_000)
+        result = server_module.run_sql("SELECT * FROM big", max_rows=rows)
     finally:
         server_module.set_context(None)
-    assert result["row_count"] == 10_000
-    assert "warning" not in result
+    assert result["row_count"] == rows
+    assert "warning" not in result, (
+        f"narrow 20k-row result should not warn (got: {result.get('warning')})"
+    )
 
 
-def test_run_sql_above_recommended_threshold_emits_warning(tmp_path: Path) -> None:
-    ctx = _ctx_with_generated_view(tmp_path, row_count=15_000)
+def test_run_sql_text_heavy_result_warns_at_low_row_count(tmp_path: Path) -> None:
+    """Counter-case: a thousand rows of long text columns crosses the byte
+    threshold and should warn. Row-count thresholds would have missed this."""
+    rows = 1_000
+    long_str = "x" * 800  # 800-byte payload per row
+    table = pa.table(
+        {
+            "id": list(range(rows)),
+            "body": [long_str] * rows,
+        }
+    )
+    ctx = _ctx_with_view(tmp_path, table)
     server_module.set_context(ctx)
     try:
-        result = server_module.run_sql("SELECT * FROM big", max_rows=20_000)
+        result = server_module.run_sql("SELECT * FROM big", max_rows=rows)
     finally:
         server_module.set_context(None)
-    assert result["row_count"] == 15_000
+    assert result["row_count"] == rows
     assert "warning" in result
-    assert "15000" in result["warning"] or "15,000" in result["warning"]
-    assert "10000" in result["warning"] or "10,000" in result["warning"]
+    # The warning surfaces the actual size in KB, a token estimate, and
+    # context-size reference points so the LLM can reason about whether
+    # the result will overflow its current window.
+    assert "KB" in result["warning"]
+    assert "tokens" in result["warning"]
+    assert "200k" in result["warning"]  # Sonnet/Haiku context reference
+    assert "1M" in result["warning"]    # Opus context reference
 
 
 def test_run_sql_max_rows_clamped_to_new_ceiling(tmp_path: Path) -> None:
-    """Requesting max_rows above the 30_000 ceiling must clamp down to it."""
-    ctx = _ctx_with_generated_view(tmp_path, row_count=40_000)
+    """Requesting max_rows above the 30_000 ceiling must clamp down to it.
+
+    Use a narrow schema so this test focuses on the clamp itself, not on
+    whether the byte warning fires (which depends on schema width).
+    """
+    table = pa.table({"n": list(range(40_000))})
+    ctx = _ctx_with_view(tmp_path, table)
     server_module.set_context(ctx)
     try:
         result = server_module.run_sql("SELECT * FROM big", max_rows=100_000)
@@ -425,13 +460,19 @@ def test_run_sql_max_rows_clamped_to_new_ceiling(tmp_path: Path) -> None:
         server_module.set_context(None)
     assert result["row_count"] == 30_000
     assert result["truncated"] is True
-    assert "warning" in result  # 30_000 > 10_000
 
 
 def test_run_sql_user_max_rows_below_threshold_wins(tmp_path: Path) -> None:
-    """User asked for a small result; even if the view is huge, we return
-    what they asked for without a warning."""
-    ctx = _ctx_with_generated_view(tmp_path, row_count=50_000)
+    """User asked for a small result; even if the view is huge and wide,
+    we return what they asked for and don't warn on a sub-threshold payload."""
+    long_str = "x" * 500
+    table = pa.table(
+        {
+            "id": list(range(50_000)),
+            "body": [long_str] * 50_000,
+        }
+    )
+    ctx = _ctx_with_view(tmp_path, table)
     server_module.set_context(ctx)
     try:
         result = server_module.run_sql("SELECT * FROM big", max_rows=500)
@@ -439,4 +480,5 @@ def test_run_sql_user_max_rows_below_threshold_wins(tmp_path: Path) -> None:
         server_module.set_context(None)
     assert result["row_count"] == 500
     assert result["truncated"] is True
+    # 500 rows × ~520 bytes ≈ 260 KB; under the 500 KB threshold → no warning.
     assert "warning" not in result
