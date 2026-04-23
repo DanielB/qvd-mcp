@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 from qvd_mcp import state as state_module
 from qvd_mcp.config import Config
 from qvd_mcp.convert import discover_qvds, run_once
@@ -179,3 +182,49 @@ def test_atomic_write_leaves_no_tmp_files(tmp_path: Path) -> None:
     run_once(_cfg(source, cache))
     leftover = list(cache.glob("*.tmp"))
     assert not leftover
+
+
+def test_run_once_is_noop_when_source_dir_is_none(tmp_path: Path) -> None:
+    # Regression: a cache-only config (source_dir=None) used to trip
+    # the orphan-prune loop, which interpreted the empty discovery as
+    # "every cached parquet has vanished" and unlinked them all.
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    shared_a = cache / "sales.parquet"
+    shared_b = cache / "inventory.parquet"
+    pq.write_table(pa.table({"x": [1, 2]}), str(shared_a))
+    pq.write_table(pa.table({"y": [3]}), str(shared_b))
+
+    prior = state_module.State(
+        entries={
+            "/producer/src/sales.qvd": state_module.StateEntry(
+                view_name="sales",
+                parquet_path="sales.parquet",
+                source_mtime_ns=0,
+                source_size=0,
+                converted_at=state_module.now_iso(),
+                rows=2,
+                columns=1,
+            ),
+            "/producer/src/inventory.qvd": state_module.StateEntry(
+                view_name="inventory",
+                parquet_path="inventory.parquet",
+                source_mtime_ns=0,
+                source_size=0,
+                converted_at=state_module.now_iso(),
+                rows=1,
+                columns=1,
+            ),
+        }
+    )
+    state_module.save(cache, prior)
+
+    config = Config(cache_dir=cache, source_dir=None)
+    report = run_once(config)
+
+    assert shared_a.is_file()
+    assert shared_b.is_file()
+    assert report.converted == []
+    assert report.skipped == []
+    assert report.failed == []
+    assert report.pruned == []
