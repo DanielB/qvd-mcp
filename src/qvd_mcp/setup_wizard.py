@@ -1,8 +1,15 @@
 """Interactive (and ``--yes``) setup wizard for qvd-mcp.
 
-The wizard writes ``config.toml``, merges a ``qvd`` entry into the Claude
-Desktop config, and runs one initial conversion pass. It is reused from the
-``qvd-mcp setup`` CLI command (Wave 3 wires that in).
+The wizard writes ``config.toml`` and merges a ``qvd-mcp`` entry into the
+Claude Desktop config. It branches between two flows:
+
+- **Producer** — the user has QVD files to convert. Setup records
+  ``source_dir`` in the generated config and runs one initial conversion
+  pass so the cache is populated before the MCP server starts.
+- **Consumer** — the user received a pre-built parquet cache (e.g. zipped
+  up by a colleague). Setup skips the source prompt, requires the cache
+  directory to already contain ``*.parquet`` files, and does not run
+  conversion.
 
 Design notes:
 
@@ -14,8 +21,10 @@ Design notes:
 - Single-quoted TOML literal strings for path values — no backslash
   escaping needed on Windows. Paths containing ``'`` are a rare edge case
   and are rejected with a clear error rather than silently mangled.
-- ``run_setup`` validates the source directory **before** touching any
-  files, so a bad invocation never leaves a half-written config.
+- ``run_setup`` validates producer inputs (explicit ``--source``) and
+  consumer inputs (``--cache`` must contain parquets when no source given)
+  **before** touching any files, so a bad invocation never leaves a
+  half-written config.
 - Atomic write for ``config.toml`` via ``.tmp`` + ``os.replace`` to match
   the pattern used elsewhere in the codebase.
 """
@@ -48,7 +57,7 @@ class SetupError(Exception):
 
 @dataclass(frozen=True)
 class SetupChoices:
-    source_dir: Path
+    source_dir: Path | None
     cache_dir: Path
     patch_claude: bool
     include: tuple[str, ...] = ()
@@ -56,38 +65,53 @@ class SetupChoices:
 
 
 def gather_interactive() -> SetupChoices:
-    """Prompt the user for source dir, cache dir, and the Claude Desktop opt-in.
-
-    Validates that the source directory exists after each prompt and loops
-    until the user provides a valid one (or aborts with Ctrl-C).
-    """
+    """Prompt the user. Branches on whether they have QVDs or a shared cache."""
     console = Console()
     console.print("[bold]Welcome to qvd-mcp setup.[/bold]\n")
 
-    default_source = Path.home() / "Documents" / "QVDs"
-    default_cache = qmcp_config.default_cache_dir()
-
-    while True:
-        source_raw = Prompt.ask(
-            "1. Where are your QVD files?",
-            default=str(default_source),
-        )
-        source_dir = Path(source_raw).expanduser().resolve()
-        if source_dir.is_dir():
-            break
-        console.print(
-            f"[yellow]'{source_dir}' does not exist or is not a directory. "
-            "Please try again.[/yellow]"
-        )
-
-    cache_raw = Prompt.ask(
-        "2. Where should qvd-mcp keep the Parquet cache?",
-        default=str(default_cache),
+    has_qvds = Confirm.ask(
+        "Do you have QVD files to convert? (No = you received a shared cache)",
+        default=True,
     )
-    cache_dir = Path(cache_raw).expanduser().resolve()
+
+    source_dir: Path | None = None
+    if has_qvds:
+        default_source = Path.home() / "Documents" / "QVDs"
+        while True:
+            source_raw = Prompt.ask(
+                "Where are your QVD files?",
+                default=str(default_source),
+            )
+            candidate = Path(source_raw).expanduser().resolve()
+            if candidate.is_dir():
+                source_dir = candidate
+                break
+            console.print(
+                f"[yellow]'{candidate}' does not exist or is not a directory. "
+                "Please try again.[/yellow]"
+            )
+
+    default_cache = qmcp_config.default_cache_dir()
+    while True:
+        cache_raw = Prompt.ask(
+            "Where should qvd-mcp keep the Parquet cache?"
+            if has_qvds
+            else "Where is the shared cache folder?",
+            default=str(default_cache),
+        )
+        cache_dir = Path(cache_raw).expanduser().resolve()
+        if not has_qvds and (
+            not cache_dir.is_dir() or not any(cache_dir.glob("*.parquet"))
+        ):
+            console.print(
+                f"[yellow]'{cache_dir}' has no *.parquet files. "
+                "Extract your shared cache first.[/yellow]"
+            )
+            continue
+        break
 
     patch_claude = Confirm.ask(
-        "3. Add qvd-mcp to your Claude Desktop config?",
+        "Add qvd-mcp to your Claude Desktop config?",
         default=True,
     )
 
@@ -123,25 +147,26 @@ def _toml_literal_list(values: tuple[str, ...]) -> str:
 def write_config_toml(choices: SetupChoices, *, path: Path | None = None) -> Path:
     """Write a minimal ``config.toml`` reflecting ``choices``.
 
-    Uses single-quoted TOML literal strings so backslashes in Windows paths
-    are not interpreted as escape sequences. Parent directories are created
-    as needed. Writes atomically via ``.tmp`` + ``os.replace`` so a crash
-    mid-write can't truncate the file. Returns the final path.
+    ``source_dir`` is omitted when unset - that's the signal for cache-only
+    operation. Uses single-quoted TOML literal strings so backslashes in
+    Windows paths are not interpreted as escape sequences. Parent directories
+    are created as needed. Writes atomically via ``.tmp`` + ``os.replace`` so
+    a crash mid-write can't truncate the file. Returns the final path.
     """
     target = path if path is not None else qmcp_config.default_config_path()
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    source_str = str(choices.source_dir)
     cache_str = str(choices.cache_dir)
-    payload = (
-        "# qvd-mcp config - generated by `qvd-mcp setup`\n"
-        f"source_dir = {_toml_literal_string(source_str)}\n"
-        f"cache_dir = {_toml_literal_string(cache_str)}\n"
-    )
+    body_lines = ["# qvd-mcp config - generated by `qvd-mcp setup`"]
+    if choices.source_dir is not None:
+        source_str = str(choices.source_dir)
+        body_lines.append(f"source_dir = {_toml_literal_string(source_str)}")
+    body_lines.append(f"cache_dir = {_toml_literal_string(cache_str)}")
     if choices.include:
-        payload += f"include = {_toml_literal_list(choices.include)}\n"
+        body_lines.append(f"include = {_toml_literal_list(choices.include)}")
     if choices.exclude:
-        payload += f"exclude = {_toml_literal_list(choices.exclude)}\n"
+        body_lines.append(f"exclude = {_toml_literal_list(choices.exclude)}")
+    payload = "\n".join(body_lines) + "\n"
 
     tmp = target.with_suffix(target.suffix + ".tmp")
     try:
@@ -230,32 +255,46 @@ def run_setup(
 ) -> None:
     """Drive the whole setup flow.
 
-    In ``yes=True`` mode, ``source`` is required and must be an existing
-    directory; ``cache`` defaults to :func:`qvd_mcp.config.default_cache_dir`,
-    and ``patch_claude`` is ``True`` unless ``no_claude`` is set.
+    ``yes=True`` with ``--source`` is the producer path (today's behavior,
+    runs an initial conversion pass). ``yes=True`` without ``--source`` is
+    the consumer path: skips source validation and conversion, but requires
+    ``--cache`` to point at a folder that already has ``*.parquet`` files.
 
-    In interactive mode, prompts the user for every choice and then honors
-    ``no_claude`` as a post-prompt override (so a user who types "yes" to
-    the prompt but passed ``--no-claude`` still gets the CLI flag to win).
+    In interactive mode, the user picks producer vs consumer at the top.
+    ``no_claude`` is honored as a post-prompt override (so a user who types
+    "yes" to the prompt but passed ``--no-claude`` still gets the CLI flag
+    to win).
     """
     console = Console()
 
     if yes:
-        if source is None:
-            raise SetupError(
-                "--yes mode requires --source to be given explicitly."
-            )
-        source_resolved = Path(source).expanduser().resolve()
-        if not source_resolved.is_dir():
-            raise SetupError(
-                f"source directory does not exist or is not a directory: "
-                f"{source_resolved}"
-            )
+        if source is not None:
+            source_resolved: Path | None = Path(source).expanduser().resolve()
+            assert source_resolved is not None
+            if not source_resolved.is_dir():
+                raise SetupError(
+                    f"source directory does not exist or is not a directory: "
+                    f"{source_resolved}"
+                )
+        else:
+            source_resolved = None
+
         cache_resolved = (
             Path(cache).expanduser().resolve()
             if cache is not None
             else qmcp_config.default_cache_dir()
         )
+
+        if source_resolved is None and (
+            not cache_resolved.is_dir()
+            or not any(cache_resolved.glob("*.parquet"))
+        ):
+            raise SetupError(
+                f"no --source given and --cache has no *.parquet files: "
+                f"{cache_resolved}. Either pass --source to convert QVDs, "
+                "or point --cache at an already-populated cache folder."
+            )
+
         choices = SetupChoices(
             source_dir=source_resolved,
             cache_dir=cache_resolved,
@@ -294,6 +333,15 @@ def run_setup(
             f"(command: [cyan]{command} {' '.join(args)}[/cyan])"
         )
 
+    if choices.source_dir is None:
+        parquet_count = sum(1 for _ in choices.cache_dir.glob("*.parquet"))
+        console.print(
+            f"\n[bold green]Setup complete![/bold green]\n"
+            f"{parquet_count} parquet file(s) in [bold]{choices.cache_dir}[/bold].\n"
+            "Restart Claude Desktop and ask it to list your QVDs."
+        )
+        return
+
     try:
         cfg = qmcp_config.load(
             source_override=choices.source_dir,
@@ -306,6 +354,7 @@ def run_setup(
     report = convert.run_once(cfg)
     _print_report_table(report, console)
     console.print(
-        "\n[bold green]Setup complete![/bold green] "
+        f"\n[bold green]Setup complete![/bold green] "
+        f"Parquets live in [bold]{cfg.cache_dir}[/bold].\n"
         "Restart Claude Desktop and ask it to list your QVDs."
     )
